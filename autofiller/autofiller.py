@@ -293,6 +293,56 @@ def scroll_and_fill_all(page):
     return filled
 
 
+def auto_advance_pages(page, max_steps=8):
+    """
+    After filling a form page, detect and click Next/Continue if present.
+    Stops when no Next button is found (final page) or max_steps is reached.
+    Never clicks Submit, Apply, or Send buttons — those stay for the user.
+    Returns the number of pages advanced (0 = already on final page).
+    """
+    NEXT_SELECTORS = [
+        'button:has-text("Next")',
+        'button:has-text("Continue")',
+        'button:has-text("Next Step")',
+        'button:has-text("Save and Continue")',
+        'input[type="submit"][value*="Next" i]',
+        'input[type="submit"][value*="Continue" i]',
+    ]
+    STOP_WORDS = ["submit", "apply", "send application", "review application", "finish"]
+
+    steps = 0
+    for _ in range(max_steps):
+        next_btn = None
+        for selector in NEXT_SELECTORS:
+            try:
+                el = page.locator(selector).first
+                if el.count() and el.is_visible(timeout=2000):
+                    # Check stop words against the button's text content or value
+                    try:
+                        btn_text = el.evaluate(
+                            "el => (el.textContent || el.value || '').toLowerCase().trim()"
+                        )
+                    except Exception:
+                        btn_text = ""
+                    if any(sw in btn_text for sw in STOP_WORDS):
+                        return steps
+                    next_btn = el
+                    break
+            except Exception:
+                continue
+
+        if next_btn is None:
+            break
+
+        next_btn.click()
+        page.wait_for_timeout(1800)
+        scroll_and_fill_all(page)
+        steps += 1
+        log(f"Auto-advanced to page {steps + 1}", "➡")
+
+    return steps
+
+
 # ── PLATFORM-SPECIFIC HANDLERS ─────────────────────────────────────────────
 
 def handle_linkedin(page, url):
@@ -325,6 +375,7 @@ def handle_greenhouse(page, url):
     page.goto(url, wait_until="domcontentloaded")
     page.wait_for_timeout(2000)
     scroll_and_fill_all(page)
+    auto_advance_pages(page)
     log("Fields pre-filled. Review and submit when ready.", "👀")
 
 
@@ -334,6 +385,7 @@ def handle_lever(page, url):
     page.goto(url, wait_until="domcontentloaded")
     page.wait_for_timeout(2000)
     scroll_and_fill_all(page)
+    auto_advance_pages(page)
     log("Fields pre-filled. Review and submit when ready.", "👀")
 
 
@@ -358,6 +410,7 @@ def handle_indeed(page, url):
         pass
 
     scroll_and_fill_all(page)
+    auto_advance_pages(page)
     log("Fields pre-filled. Review and submit when ready.", "👀")
 
 
@@ -381,6 +434,7 @@ def handle_generic(page, url):
         pass
 
     scroll_and_fill_all(page)
+    auto_advance_pages(page)
     log("Fields pre-filled. Review and submit when ready.", "👀")
 
 
