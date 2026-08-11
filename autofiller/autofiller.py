@@ -453,18 +453,13 @@ def _close_context(context):
             pass
 
 
-def run_application_prefill(playwright, job_info, headless=False):
+def _open_shared_context(playwright, headless=False):
     """
-    Open a browser context for job_info['url'], pre-fill the form.
-    Returns the (context, page, url) tuple — caller is responsible for close.
-    Returns (None, None, url) on failure.
+    Open a single browser context (persistent Chrome profile if available, fresh
+    Chromium otherwise). Returns the context, or None on failure. Caller is
+    responsible for closing via _close_context().
     """
-    url = job_info.get("url", "") if isinstance(job_info, dict) else str(job_info)
-
-    # Try to use the real Chrome profile so LinkedIn/Indeed auth is inherited.
-    # Falls back to a fresh browser if the profile can't be used.
     chrome_profile = get_chrome_profile_path()
-    context = None
 
     if chrome_profile:
         try:
@@ -477,42 +472,63 @@ def run_application_prefill(playwright, job_info, headless=False):
                 viewport={"width": 1280, "height": 900},
             )
             log("Using your Chrome profile (auth sessions inherited)", "✓")
+            return context
         except Exception as e:
             log(f"Could not load Chrome profile ({e}) — using fresh browser", "!")
-            context = None
 
+    # Fallback: launch a plain Chromium browser
+    try:
+        browser = playwright.chromium.launch(headless=headless, slow_mo=80)
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+        )
+        _context_browsers[id(context)] = browser  # track for cleanup
+        log("Using fresh browser — you may need to log in to LinkedIn/Indeed manually", "!")
+        return context
+    except Exception as e:
+        log(f"Failed to launch browser: {e}", "!")
+        return None
+
+
+def _prefill_page(page, job_info):
+    """
+    Navigate to job_info['url'] and pre-fill the form on an already-open page.
+    Prints the job header and calls the appropriate platform handler.
+    """
+    url = job_info.get("url", "") if isinstance(job_info, dict) else str(job_info)
+
+    if isinstance(job_info, dict) and (job_info.get("title") or job_info.get("company")):
+        print(f"\n{'─'*60}")
+        print(f"  {job_info.get('title', 'Role')} @ {job_info.get('company', '')}")
+        print(f"  Score: {job_info.get('score', '?')}/100  |  {job_info.get('source', '')}")
+        print(f"  {url}")
+        print(f"{'─'*60}")
+
+    platform = detect_platform(url)
+    handler = HANDLERS[platform]
+    handler(page, url)
+
+
+def run_application_prefill(playwright, job_info, headless=False):
+    """
+    Open a browser context for job_info['url'], pre-fill the form.
+    Returns the (context, page, url) tuple — caller is responsible for close.
+    Returns (None, None, url) on failure.
+    """
+    url = job_info.get("url", "") if isinstance(job_info, dict) else str(job_info)
+
+    context = _open_shared_context(playwright, headless)
     if context is None:
-        # Fallback: launch a plain Chromium browser
-        try:
-            browser = playwright.chromium.launch(headless=headless, slow_mo=80)
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 900},
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-            )
-            _context_browsers[id(context)] = browser  # track for cleanup
-            log("Using fresh browser — you may need to log in to LinkedIn/Indeed manually", "!")
-        except Exception as e:
-            log(f"Failed to launch browser: {e}", "!")
-            return (None, None, url)
+        return (None, None, url)
 
     try:
         page = context.new_page()
-
-        if isinstance(job_info, dict) and (job_info.get("title") or job_info.get("company")):
-            print(f"\n{'─'*60}")
-            print(f"  {job_info.get('title', 'Role')} @ {job_info.get('company', '')}")
-            print(f"  Score: {job_info.get('score', '?')}/100  |  {job_info.get('source', '')}")
-            print(f"  {url}")
-            print(f"{'─'*60}")
-
-        platform = detect_platform(url)
-        handler = HANDLERS[platform]
-        handler(page, url)
-
+        _prefill_page(page, job_info)
         return (context, page, url)
     except Exception as e:
         log(f"Error pre-filling application: {e}", "!")
@@ -557,8 +573,9 @@ def run_application(playwright, url, job_info=None, headless=False):
 
 def run_batch_session(playwright, jobs, batch_size=5, headless=False):
     """
-    Open up to `batch_size` jobs simultaneously, pre-fill each, then
-    let the user cycle through and submit. Returns (applied, skipped).
+    Open up to `batch_size` jobs simultaneously in a shared browser context,
+    pre-fill each as a separate page, then let the user cycle through and submit.
+    Returns (applied, skipped).
     """
     applied = 0
     skipped = 0
@@ -568,19 +585,38 @@ def run_batch_session(playwright, jobs, batch_size=5, headless=False):
         chunk = jobs[chunk_start: chunk_start + batch_size]
         n = len(chunk)
 
-        # ── Open and pre-fill all jobs in this chunk ──────────────────────
+        # ── Open ONE shared context for the whole chunk ────────────────────
+        # A single launch_persistent_context call avoids the Chrome profile
+        # filesystem lock that would prevent a second context from inheriting auth.
         print(f"\n  Opening {n} application(s) in batch {batch_num} of {total_batches}...")
-        open_tabs = []  # list of (context, page, url, job)
+        shared_context = _open_shared_context(playwright, headless)
+        if shared_context is None:
+            log("Could not open browser for this batch — skipping all jobs in chunk", "!")
+            for job in chunk:
+                tab_url = job.get("url", "")
+                if tab_url:
+                    skipped += 1
+                    update_job_status(tab_url, "skipped")
+            continue
+
+        # ── Pre-fill each job as a new page inside the shared context ─────
+        open_tabs = []  # list of (page_or_None, url, job)
 
         for job in chunk:
             tab_url = job.get("url", "")
             if not tab_url:
                 continue
             print(f"\n  Pre-filling: {job.get('title', 'Role')} @ {job.get('company', '')}...")
-            context, page, tab_url = run_application_prefill(playwright, job, headless)
-            open_tabs.append((context, page, tab_url, job))
+            try:
+                page = shared_context.new_page()
+                _prefill_page(page, job)
+                open_tabs.append((page, tab_url, job))
+            except Exception as e:
+                log(f"Error pre-filling {tab_url}: {e}", "!")
+                open_tabs.append((None, tab_url, job))
 
         if not open_tabs:
+            _close_context(shared_context)
             continue
 
         # ── Print batch summary table ──────────────────────────────────────
@@ -594,7 +630,7 @@ def run_batch_session(playwright, jobs, batch_size=5, headless=False):
         print(f"  │{header_text[:W].ljust(W)}│")
         print(f"  ├{'─' * W}┤")
 
-        for tab_idx, (ctx, pg, tab_url, job) in enumerate(open_tabs, 1):
+        for tab_idx, (pg, tab_url, job) in enumerate(open_tabs, 1):
             title = (job.get("title") or "Role")[:24]
             company = (job.get("company") or "")[:14]
             pname = detect_platform(tab_url).capitalize()
@@ -607,15 +643,15 @@ def run_batch_session(playwright, jobs, batch_size=5, headless=False):
         print(f"  └{'─' * W}┘")
         print(f"\n  Switch to Tab 1 in your browser, review and submit, then come back here.")
 
-        # ── Process each tab in sequence ──────────────────────────────────
+        # ── Process each tab in sequence; close each page after user action ─
         quit_session = False
-        for i, (context, page, tab_url, job) in enumerate(open_tabs):
+        for i, (page, tab_url, job) in enumerate(open_tabs):
             tab_idx = i + 1
             title = (job.get("title") or "Role")
             company = (job.get("company") or "")
             tab_label = f"{title} @ {company}" if company else title
 
-            if context is None:
+            if page is None:
                 print(f"\n  Tab {tab_idx} ({tab_label}) — failed to open, skipping.")
                 skipped += 1
                 update_job_status(tab_url, "skipped")
@@ -632,9 +668,16 @@ def run_batch_session(playwright, jobs, batch_size=5, headless=False):
                 response = "q"
 
             if response == "q":
-                _close_context(context)
-                for remaining_ctx, _, _, _ in open_tabs[i + 1:]:
-                    _close_context(remaining_ctx)
+                try:
+                    page.close()
+                except Exception:
+                    pass
+                for remaining_page, _, _ in open_tabs[i + 1:]:
+                    if remaining_page is not None:
+                        try:
+                            remaining_page.close()
+                        except Exception:
+                            pass
                 quit_session = True
                 break
             elif response == "s":
@@ -646,7 +689,13 @@ def run_batch_session(playwright, jobs, batch_size=5, headless=False):
                 applied += 1
                 print(f"  ✅ Application {applied} submitted.")
 
-            _close_context(context)
+            try:
+                page.close()
+            except Exception:
+                pass
+
+        # Close the shared context after all pages in this chunk are done
+        _close_context(shared_context)
 
         if quit_session:
             break
@@ -690,6 +739,9 @@ def main():
     parser.add_argument("--batch", type=int, default=5, metavar="N",
                         help="Open N applications simultaneously (default: 5; 1 = sequential mode)")
     args = parser.parse_args()
+
+    if not 1 <= args.batch <= 10:
+        parser.error("--batch must be between 1 and 10")
 
     if not args.jobs and not args.url:
         parser.print_help()
