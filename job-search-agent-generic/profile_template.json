@@ -1,0 +1,88 @@
+{
+    "_instructions": "Rename this file to profile.json and fill in your details. Delete this _instructions field.",
+
+    "name": "Your Name",
+
+    "target_titles": [
+        "Senior Software Engineer",
+        "Staff Software Engineer",
+        "Software Engineer Lead"
+    ],
+
+    "search_queries": [
+        "senior software engineer remote",
+        "staff software engineer remote",
+        "software engineering lead remote"
+    ],
+
+    "job_keywords": [
+        "software engineer",
+        "developer",
+        "engineer"
+    ],
+
+    "must_be_remote": true,
+
+    "salary_min": 100000,
+    "salary_max": 150000,
+
+    "top_skills": [
+        "Python",
+        "JavaScript",
+        "TypeScript",
+        "React",
+        "AWS",
+        "Docker",
+        "Kubernetes",
+        "PostgreSQL",
+        "REST API"
+    ],
+
+    "years_experience": 10,
+
+    "seniority_keywords": [
+        "senior", "lead", "manager", "staff", "principal", "head of"
+    ],
+
+    "avoid_keywords": [
+        "on-site only", "onsite only", "must be local", "no remote",
+        "junior", "entry level", "intern", "0-2 years", "1-2 years"
+    ],
+
+    "domain_avoid_keywords": [],
+
+    "non_us_signals": [
+        "uk only", "united kingdom only", "eu only", "europe only",
+        "canada only", "australia only", "india only", "latam only",
+        "emea only", "apac only", "latin america only", "mexico only",
+        "costa rica only", "outside the us", "not available in the us",
+        "not open to us", "must be based in", "must reside in", "must live in",
+        "not eligible to work in the us", "excluding the us", "no us applicants"
+    ],
+
+    "us_positive_signals": [
+        "united states", "u.s.", "us only", "us-based", "us residents",
+        "must be us", "work in the us", "authorized to work in the us",
+        "remote us", "remote - us", "remote (us)", "remote, us",
+        "anywhere in the us", "all 50 states", "conus"
+    ],
+
+    "preferred_company_signals": [
+        "series c", "series d", "series e", "growth stage",
+        "saas", "fintech", "healthtech", "b2b"
+    ],
+
+    "greenhouse_companies": [
+        "figma", "lattice", "brex", "carta", "contentful",
+        "postman", "launchdarkly", "pendo", "amplitude", "mixpanel",
+        "datadog", "grafanalabs", "buildkite", "honeycomb", "saucelabs"
+    ],
+
+    "ashby_companies": [
+        "notion", "linear", "temporal", "snyk", "confluent",
+        "airtable", "clickup", "miro", "fullstory", "sentry",
+        "loom", "ramp", "mercury", "vercel", "render",
+        "neon", "supabase", "wiz", "launchdarkly", "bettercloud",
+        "prefect", "airbyte", "hightouch", "amplitude"
+    ]
+}

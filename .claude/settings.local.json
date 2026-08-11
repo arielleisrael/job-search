@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 job_search_agent.py --since 7 --save)",
+      "Bash(python3 -c ' *)",
+      "WebFetch(domain:remotive.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(python3 job_search_agent_v2.py --since 7 --skip-linkedin --skip-indeed)",
+      "Bash(python3 /private/tmp/claude-501/-Users-arielleisrael-job-search/8fb78f28-eaf3-4bbc-b19d-aca09814c619/scratchpad/verify_slugs.py)",
+      "Bash(python3 job_search_agent_v2.py --since 7 --save)",
+      "mcp__4743fc01-ed09-41c5-b447-34952cdf3be9__notion-search",
+      "mcp__4743fc01-ed09-41c5-b447-34952cdf3be9__notion-fetch",
+      "Bash(python3 -)",
+      "Bash(cat /tmp/notion_content.txt)",
+      "Bash(python3 -c \" *)",
+      "Bash(zip -r job-search-agent.zip job-search-agent-generic/ --exclude \"job-search-agent-generic/logs/*\" --exclude \"job-search-agent-generic/results/*\")",
+      "mcp__visualize__read_me",
+      "mcp__visualize__show_widget",
+      "Bash(crontab -l)",
+      "Bash(python3 job_search_agent_v2.py --since 7 --save --skip-linkedin --skip-indeed)",
+      "Bash(curl -s \"https://api.lever.co/v0/postings/plaid?mode=json\")",
+      "Bash(curl -s -I \"https://api.lever.co/v0/postings/plaid?mode=json\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" \"https://api.lever.co/v1/postings/plaid\")",
+      "Bash(curl -s \"https://remotive.com/api/remote-jobs?category=software-dev&limit=5\")",
+      "Bash(curl -s \"https://www.themuse.com/api/public/jobs?category=Engineering&level=Senior%20Level&page=1&per_page=5\")"
+    ]
+  }
+}

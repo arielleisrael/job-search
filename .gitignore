@@ -1,0 +1,11 @@
+applied_jobs.db
+logs/
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+agent-extracted/
+zzz_archive/
+job-search-agent-generic.zip
+job-search-agent.zip
+.superpowers/
