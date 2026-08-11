@@ -433,14 +433,38 @@ def get_chrome_profile_path():
     return None
 
 
-def run_application(playwright, url, job_info=None, headless=False):
-    """Open one job application, pre-fill, and wait for user to submit."""
+# Maps context id → backing browser (used when context is non-persistent)
+_context_browsers: dict = {}
+
+
+def _close_context(context):
+    """Close a browser context and its backing browser if one was launched for it."""
+    if context is None:
+        return
+    browser = _context_browsers.pop(id(context), None)
+    try:
+        context.close()
+    except Exception:
+        pass
+    if browser:
+        try:
+            browser.close()
+        except Exception:
+            pass
+
+
+def run_application_prefill(playwright, job_info, headless=False):
+    """
+    Open a browser context for job_info['url'], pre-fill the form.
+    Returns the (context, page, url) tuple — caller is responsible for close.
+    Returns (None, None, url) on failure.
+    """
+    url = job_info.get("url", "") if isinstance(job_info, dict) else str(job_info)
 
     # Try to use the real Chrome profile so LinkedIn/Indeed auth is inherited.
     # Falls back to a fresh browser if the profile can't be used.
     chrome_profile = get_chrome_profile_path()
     context = None
-    browser = None
 
     if chrome_profile:
         try:
@@ -459,29 +483,56 @@ def run_application(playwright, url, job_info=None, headless=False):
 
     if context is None:
         # Fallback: launch a plain Chromium browser
-        browser = playwright.chromium.launch(headless=headless, slow_mo=80)
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-        )
-        log("Using fresh browser — you may need to log in to LinkedIn/Indeed manually", "!")
+        try:
+            browser = playwright.chromium.launch(headless=headless, slow_mo=80)
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            )
+            _context_browsers[id(context)] = browser  # track for cleanup
+            log("Using fresh browser — you may need to log in to LinkedIn/Indeed manually", "!")
+        except Exception as e:
+            log(f"Failed to launch browser: {e}", "!")
+            return (None, None, url)
 
-    page = context.new_page()
+    try:
+        page = context.new_page()
 
-    if job_info:
-        print(f"\n{'─'*60}")
-        print(f"  {job_info.get('title','Role')} @ {job_info.get('company','')}")
-        print(f"  Score: {job_info.get('score','?')}/100  |  {job_info.get('source','')}")
-        print(f"  {url}")
-        print(f"{'─'*60}")
+        if isinstance(job_info, dict) and (job_info.get("title") or job_info.get("company")):
+            print(f"\n{'─'*60}")
+            print(f"  {job_info.get('title', 'Role')} @ {job_info.get('company', '')}")
+            print(f"  Score: {job_info.get('score', '?')}/100  |  {job_info.get('source', '')}")
+            print(f"  {url}")
+            print(f"{'─'*60}")
 
-    platform = detect_platform(url)
-    handler = HANDLERS[platform]
-    handler(page, url)
+        platform = detect_platform(url)
+        handler = HANDLERS[platform]
+        handler(page, url)
+
+        return (context, page, url)
+    except Exception as e:
+        log(f"Error pre-filling application: {e}", "!")
+        _close_context(context)
+        return (None, None, url)
+
+
+def run_application(playwright, url, job_info=None, headless=False):
+    """Open one job application, pre-fill, and wait for user to submit."""
+    if job_info is None:
+        job_info = {"url": url, "title": "Role", "company": "", "score": "?", "source": ""}
+    else:
+        job_info = dict(job_info)
+        job_info.setdefault("url", url)
+
+    context, page, url = run_application_prefill(playwright, job_info, headless)
+
+    if context is None:
+        log("Failed to open application — skipping", "!")
+        return "s"
 
     # ── Hand control to user ───────────────────────────────────────────────
     print()
@@ -500,10 +551,107 @@ def run_application(playwright, url, job_info=None, headless=False):
     except (EOFError, KeyboardInterrupt):
         response = "q"
 
-    context.close()
-    if browser:
-        browser.close()
+    _close_context(context)
     return response  # "", "s" (skip), or "q" (quit)
+
+
+def run_batch_session(playwright, jobs, batch_size=5, headless=False):
+    """
+    Open up to `batch_size` jobs simultaneously, pre-fill each, then
+    let the user cycle through and submit. Returns (applied, skipped).
+    """
+    applied = 0
+    skipped = 0
+    total_batches = (len(jobs) + batch_size - 1) // batch_size
+
+    for batch_num, chunk_start in enumerate(range(0, len(jobs), batch_size), 1):
+        chunk = jobs[chunk_start: chunk_start + batch_size]
+        n = len(chunk)
+
+        # ── Open and pre-fill all jobs in this chunk ──────────────────────
+        print(f"\n  Opening {n} application(s) in batch {batch_num} of {total_batches}...")
+        open_tabs = []  # list of (context, page, url, job)
+
+        for job in chunk:
+            tab_url = job.get("url", "")
+            if not tab_url:
+                continue
+            print(f"\n  Pre-filling: {job.get('title', 'Role')} @ {job.get('company', '')}...")
+            context, page, tab_url = run_application_prefill(playwright, job, headless)
+            open_tabs.append((context, page, tab_url, job))
+
+        if not open_tabs:
+            continue
+
+        # ── Print batch summary table ──────────────────────────────────────
+        W = 54  # inner width of the box
+        n_open = len(open_tabs)
+        header_text = (
+            f"  Batch {batch_num} of {total_batches}"
+            f"  —  {n_open} tab{'s' if n_open != 1 else ''} pre-filled and waiting  "
+        )
+        print(f"\n  ┌{'─' * W}┐")
+        print(f"  │{header_text[:W].ljust(W)}│")
+        print(f"  ├{'─' * W}┤")
+
+        for tab_idx, (ctx, pg, tab_url, job) in enumerate(open_tabs, 1):
+            title = (job.get("title") or "Role")[:24]
+            company = (job.get("company") or "")[:14]
+            pname = detect_platform(tab_url).capitalize()
+            bracket = f"[{pname}]"
+            left = f"  Tab {tab_idx}: {title} @ {company}"
+            gap = max(1, W - len(left) - len(bracket))
+            row = (left + " " * gap + bracket)[:W].ljust(W)
+            print(f"  │{row}│")
+
+        print(f"  └{'─' * W}┘")
+        print(f"\n  Switch to Tab 1 in your browser, review and submit, then come back here.")
+
+        # ── Process each tab in sequence ──────────────────────────────────
+        quit_session = False
+        for i, (context, page, tab_url, job) in enumerate(open_tabs):
+            tab_idx = i + 1
+            title = (job.get("title") or "Role")
+            company = (job.get("company") or "")
+            tab_label = f"{title} @ {company}" if company else title
+
+            if context is None:
+                print(f"\n  Tab {tab_idx} ({tab_label}) — failed to open, skipping.")
+                skipped += 1
+                update_job_status(tab_url, "skipped")
+                continue
+
+            print(f"\n  Tab {tab_idx} ({tab_label})")
+            print(
+                f"  Press ENTER when submitted, 's' to skip, 'q' to quit: ",
+                end="", flush=True,
+            )
+            try:
+                response = input().strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                response = "q"
+
+            if response == "q":
+                _close_context(context)
+                for remaining_ctx, _, _, _ in open_tabs[i + 1:]:
+                    _close_context(remaining_ctx)
+                quit_session = True
+                break
+            elif response == "s":
+                update_job_status(tab_url, "skipped")
+                skipped += 1
+                print("  Skipped.")
+            else:
+                update_job_status(tab_url, "applied")
+                applied += 1
+                print(f"  ✅ Application {applied} submitted.")
+
+            _close_context(context)
+
+        if quit_session:
+            break
+
+    return (applied, skipped)
 
 
 def load_jobs_from_csv(csv_path, tier_filter=None, limit=None):
@@ -539,6 +687,8 @@ def main():
                         help="Max number of applications to run")
     parser.add_argument("--headless", action="store_true",
                         help="Run browser in headless mode (not recommended)")
+    parser.add_argument("--batch", type=int, default=5, metavar="N",
+                        help="Open N applications simultaneously (default: 5; 1 = sequential mode)")
     args = parser.parse_args()
 
     if not args.jobs and not args.url:
@@ -559,6 +709,8 @@ def main():
     print(f"   {len(jobs)} application(s) queued")
     if args.tier:
         print(f"   Filter: {args.tier} fit only")
+    mode_label = f"Batch (size {args.batch})" if args.batch > 1 else "Sequential"
+    print(f"   Mode: {mode_label}")
     print(f"\n   ⚠  You will review and submit each one yourself.")
     print(f"   ⚠  Update PROFILE['resume_path'] before running if needed.")
     print(f"\n   Resume: {PROFILE['resume_path']}")
@@ -572,30 +724,37 @@ def main():
     skipped = 0
 
     with sync_playwright() as playwright:
-        for i, job in enumerate(jobs, 1):
-            url = job.get("url", "")
-            if not url:
-                continue
+        if args.batch > 1:
+            app, skip = run_batch_session(
+                playwright, jobs, batch_size=args.batch, headless=args.headless
+            )
+            applied += app
+            skipped += skip
+        else:
+            for i, job in enumerate(jobs, 1):
+                url = job.get("url", "")
+                if not url:
+                    continue
 
-            print(f"\n[{i}/{len(jobs)}] Opening application...")
-            result = run_application(playwright, url, job_info=job, headless=args.headless)
+                print(f"\n[{i}/{len(jobs)}] Opening application...")
+                result = run_application(playwright, url, job_info=job, headless=args.headless)
 
-            if result == "q":
-                print("\n  Session ended by user.")
-                break
-            elif result == "s":
-                skipped += 1
-                update_job_status(url, "skipped")
-                print("  Skipped.")
-            else:
-                applied += 1
-                update_job_status(url, "applied")
-                print(f"  ✅ Application {applied} submitted.")
+                if result == "q":
+                    print("\n  Session ended by user.")
+                    break
+                elif result == "s":
+                    skipped += 1
+                    update_job_status(url, "skipped")
+                    print("  Skipped.")
+                else:
+                    applied += 1
+                    update_job_status(url, "applied")
+                    print(f"  ✅ Application {applied} submitted.")
 
-            # Brief pause between applications
-            if i < len(jobs) and result not in ("q",):
-                print(f"\n  Pausing 3 seconds before next application...")
-                time.sleep(3)
+                # Brief pause between applications
+                if i < len(jobs) and result not in ("q",):
+                    print(f"\n  Pausing 3 seconds before next application...")
+                    time.sleep(3)
 
     print(f"\n{'='*60}")
     print(f"  Session complete!")
