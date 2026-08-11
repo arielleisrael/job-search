@@ -63,6 +63,22 @@ def update_job_status(url, status):
     except Exception as e:
         print(f"  ⚠ DB update failed: {e}", file=sys.stderr)
 
+
+def write_session_log(log_path, entries):
+    """
+    Write session log entries to a CSV file.
+    entries: list of dicts with keys: timestamp, action, title, company, source, score, url
+    Creates logs/ directory if it doesn't exist.
+    """
+    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["timestamp", "action", "title", "company", "source", "score", "url"]
+    with open(log_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for entry in entries:
+            writer.writerow(entry)
+
+
 # ── YOUR PROFILE ───────────────────────────────────────────────────────────
 # Update these once. They feed every form field automatically.
 PROFILE = {
@@ -625,11 +641,12 @@ def run_application(playwright, url, job_info=None, headless=False):
     return response  # "", "s" (skip), or "q" (quit)
 
 
-def run_batch_session(playwright, jobs, batch_size=5, headless=False):
+def run_batch_session(playwright, jobs, batch_size=5, headless=False, log_entries=None):
     """
     Open up to `batch_size` jobs simultaneously in a shared browser context,
     pre-fill each as a separate page, then let the user cycle through and submit.
     Returns (applied, skipped).
+    If log_entries list is provided, batch appends action dicts to it in-place.
     """
     applied = 0
     skipped = 0
@@ -651,6 +668,16 @@ def run_batch_session(playwright, jobs, batch_size=5, headless=False):
                 if tab_url:
                     skipped += 1
                     update_job_status(tab_url, "skipped")
+                    if log_entries is not None:
+                        log_entries.append({
+                            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            "action": "skipped",
+                            "title": job.get("title", ""),
+                            "company": job.get("company", ""),
+                            "source": job.get("source", ""),
+                            "score": job.get("score", ""),
+                            "url": tab_url,
+                        })
             continue
 
         # ── Pre-fill each job as a new page inside the shared context ─────
@@ -709,6 +736,16 @@ def run_batch_session(playwright, jobs, batch_size=5, headless=False):
                 print(f"\n  Tab {tab_idx} ({tab_label}) — failed to open, skipping.")
                 skipped += 1
                 update_job_status(tab_url, "skipped")
+                if log_entries is not None:
+                    log_entries.append({
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "action": "skipped",
+                        "title": job.get("title", ""),
+                        "company": job.get("company", ""),
+                        "source": job.get("source", ""),
+                        "score": job.get("score", ""),
+                        "url": tab_url,
+                    })
                 continue
 
             print(f"\n  Tab {tab_idx} ({tab_label})")
@@ -737,10 +774,30 @@ def run_batch_session(playwright, jobs, batch_size=5, headless=False):
             elif response == "s":
                 update_job_status(tab_url, "skipped")
                 skipped += 1
+                if log_entries is not None:
+                    log_entries.append({
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "action": "skipped",
+                        "title": job.get("title", ""),
+                        "company": job.get("company", ""),
+                        "source": job.get("source", ""),
+                        "score": job.get("score", ""),
+                        "url": tab_url,
+                    })
                 print("  Skipped.")
             else:
                 update_job_status(tab_url, "applied")
                 applied += 1
+                if log_entries is not None:
+                    log_entries.append({
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "action": "applied",
+                        "title": job.get("title", ""),
+                        "company": job.get("company", ""),
+                        "source": job.get("source", ""),
+                        "score": job.get("score", ""),
+                        "url": tab_url,
+                    })
                 print(f"  ✅ Application {applied} submitted.")
 
             try:
@@ -826,13 +883,22 @@ def main():
     print()
     input("   Press ENTER to begin, or Ctrl+C to cancel...\n")
 
+    session_start = time.time()
+    log_entries = []
+    log_path = (
+        Path(__file__).parent.parent
+        / "logs"
+        / f"session_{time.strftime('%Y-%m-%d_%H%M', time.localtime(session_start))}.csv"
+    )
+
     applied = 0
     skipped = 0
 
     with sync_playwright() as playwright:
         if args.batch > 1:
             app, skip = run_batch_session(
-                playwright, jobs, batch_size=args.batch, headless=args.headless
+                playwright, jobs, batch_size=args.batch, headless=args.headless,
+                log_entries=log_entries,
             )
             applied += app
             skipped += skip
@@ -851,10 +917,28 @@ def main():
                 elif result == "s":
                     skipped += 1
                     update_job_status(url, "skipped")
+                    log_entries.append({
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "action": "skipped",
+                        "title": job.get("title", ""),
+                        "company": job.get("company", ""),
+                        "source": job.get("source", ""),
+                        "score": job.get("score", ""),
+                        "url": url,
+                    })
                     print("  Skipped.")
                 else:
                     applied += 1
                     update_job_status(url, "applied")
+                    log_entries.append({
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "action": "applied",
+                        "title": job.get("title", ""),
+                        "company": job.get("company", ""),
+                        "source": job.get("source", ""),
+                        "score": job.get("score", ""),
+                        "url": url,
+                    })
                     print(f"  ✅ Application {applied} submitted.")
 
                 # Brief pause between applications
@@ -862,11 +946,22 @@ def main():
                     print(f"\n  Pausing 3 seconds before next application...")
                     time.sleep(3)
 
+    session_end = time.time()
+    write_session_log(log_path, log_entries)
+    total_reviewed = applied + skipped
+    log_rel = f"logs/{log_path.name}"
+
     print(f"\n{'='*60}")
     print(f"  Session complete!")
     print(f"  ✅ Submitted: {applied}")
     print(f"  ⏭  Skipped:   {skipped}")
-    print(f"  📊 Log these in your dashboard!")
+    print(f"  📋 Session log: {log_rel}")
+    print(f"     Applied: {applied} | Skipped: {skipped} | Total reviewed: {total_reviewed}")
+    if total_reviewed > 0:
+        avg_secs = (session_end - session_start) / total_reviewed
+        avg_min = int(avg_secs // 60)
+        avg_sec = int(avg_secs % 60)
+        print(f"     Avg time per application: {avg_min}m {avg_sec}s")
     print(f"{'='*60}\n")
 
 
