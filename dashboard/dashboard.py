@@ -27,9 +27,20 @@ DB_PATH = _os.environ.get(
 VALID_STATUSES = {"applied", "responded", "interviewed", "offered", "rejected", "skipped"}
 
 NEXT_ACTIONS = {
-    "applied":     [("responded", "Responded"), ("rejected", "Rejected")],
-    "responded":   [("interviewed", "Interviewed"), ("rejected", "Rejected")],
-    "interviewed": [("offered", "Offered"), ("rejected", "Rejected")],
+    "applied":     [("responded", "Mark Responded"), ("rejected", "Mark Rejected")],
+    "responded":   [("interviewed", "Mark Interviewed"), ("rejected", "Mark Rejected")],
+    "interviewed": [("offered", "Mark Offered"), ("rejected", "Mark Rejected")],
+    "rejected":    [("applied", "↩ Restore to Applied")],
+}
+
+# tooltip + onclick for each action button
+BUTTON_META = {
+    "responded":   ("Record that the company reached out to you", ""),
+    "interviewed": ("Record that you had an interview",           ""),
+    "offered":     ("Record that you received an offer",         ""),
+    "rejected":    ("Mark as rejected — you can restore it later",
+                    "return confirm('Mark this application as rejected?\\nYou can restore it later from the Rejected section.')"),
+    "applied":     ("Move back to the Applied column",           ""),
 }
 
 TIER_COLORS = {
@@ -66,11 +77,13 @@ def _card(job):
 
     buttons_html = ""
     for new_status, label in NEXT_ACTIONS.get(status, []):
+        tip, onclick = BUTTON_META.get(new_status, ("", ""))
+        onclick_attr = f' onclick="{onclick}"' if onclick else ""
         buttons_html += (
             f'<form method="POST" action="/update" style="display:inline">'
             f'<input type="hidden" name="url" value="{url_esc}">'
             f'<input type="hidden" name="status" value="{new_status}">'
-            f'<button type="submit" class="btn btn-{new_status}">{label}</button>'
+            f'<button type="submit" class="btn btn-{new_status}" title="{tip}"{onclick_attr}>{label}</button>'
             f'</form>'
         )
 
@@ -176,14 +189,19 @@ def build_page(db_path: str) -> str:
   .title a:hover {{ text-decoration: underline; }}
   .date {{ font-size: .7rem; color: #94a3b8; margin-top: .2rem; }}
   .card-actions {{ margin-top: .5rem; display: flex; gap: .3rem; flex-wrap: wrap; }}
-  .btn {{ border: none; border-radius: 4px; padding: 3px 8px;
-           font-size: .72rem; cursor: pointer; font-weight: 500; }}
+  .btn {{ border: none; border-radius: 4px; padding: 4px 10px;
+           font-size: .72rem; cursor: pointer; font-weight: 600; }}
   .btn-responded   {{ background: #dbeafe; color: #1d4ed8; }}
   .btn-interviewed {{ background: #d1fae5; color: #065f46; }}
   .btn-offered     {{ background: #fef3c7; color: #92400e; }}
   .btn-rejected    {{ background: #fee2e2; color: #991b1b; }}
+  .btn-applied     {{ background: #f0fdf4; color: #166534; border: 1px solid #86efac; }}
   .btn:hover {{ filter: brightness(.92); }}
-  .rejected-bar {{ padding: .5rem 1.5rem 1rem; font-size: .8rem; color: #64748b; }}
+  .rejected-section {{ padding: .5rem 1.5rem 1rem; }}
+  .rejected-header {{ font-size: .85rem; font-weight: 600; color: #64748b;
+                      margin-bottom: .5rem; cursor: pointer; user-select: none; }}
+  .rejected-header::before {{ content: "▸ "; }}
+  .rejected-cards {{ display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .5rem; }}
   .sources {{ padding: 1rem 1.5rem 2rem; }}
   .sources h2 {{ font-size: .85rem; font-weight: 600; margin-bottom: .5rem; }}
   .sources table {{ border-collapse: collapse; font-size: .8rem; }}
@@ -199,7 +217,21 @@ def build_page(db_path: str) -> str:
   <div class="stat"><div class="stat-val">{interview_rate}</div><div class="stat-label">Interview Rate</div></div>
 </header>
 <div class="board">{columns_html}</div>
-<div class="rejected-bar">Rejected / withdrawn: {len(rejected_jobs)}</div>
+<div class="rejected-section">
+  <div class="rejected-header">Rejected / withdrawn — {len(rejected_jobs)} (click to expand)</div>
+  <div class="rejected-cards" id="rejected-cards" style="display:none">
+    {"".join(_card(j) for j in rejected_jobs) if rejected_jobs else '<p style="color:#94a3b8;font-size:.8rem">None yet</p>'}
+  </div>
+</div>
+<script>
+  document.querySelector('.rejected-header').addEventListener('click', function() {{
+    var cards = document.getElementById('rejected-cards');
+    var expanded = cards.style.display !== 'none';
+    cards.style.display = expanded ? 'none' : 'flex';
+    this.style.setProperty('--open', expanded ? '' : '▾ ');
+    this.innerHTML = this.innerHTML.replace(expanded ? '▾' : '▸', expanded ? '▸' : '▾');
+  }});
+</script>
 <div class="sources">
   <h2>Applications by source</h2>
   <table><tr><td>Source</td><td>Count</td></tr>{source_html}</table>

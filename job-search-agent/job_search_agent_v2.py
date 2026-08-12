@@ -723,6 +723,20 @@ def score_job(job, since_days):
     if "aerospace" in combined and "quality" in title_lower:
         return None, [], []
 
+    # ── Hard filter: hybrid / on-site work arrangements ──
+    # "hybrid" in location or description means not fully remote — hard stop.
+    if "hybrid" in loc_lower:
+        return None, [], []
+    hybrid_desc_signals = [
+        "hybrid work", "hybrid position", "hybrid role", "hybrid model",
+        "hybrid schedule", "hybrid arrangement", "hybrid work arrangement",
+        "days per week in office", "days in the office", "days in office",
+        "in-office requirement", "days on-site", "days onsite",
+        "days per week onsite", "required to be in office",
+    ]
+    if any(s in desc_lower for s in hybrid_desc_signals):
+        return None, [], []
+
     # ── Title relevance (0–30) ──
     exact_hits = [t for t in PROFILE["target_titles"] if t.lower() in title_lower]
     qe_partial = ["quality", "sdet", "test engineer", "qa engineer",
