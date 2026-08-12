@@ -173,6 +173,10 @@ RESUME_FORCE_MAP = {
 }
 _RESUME_FORCED = None   # set from --resume flag in main()
 
+# Persistent browser profile — sessions (LinkedIn, Greenhouse, etc.) survive between runs.
+# Run `python3 autofiller.py --login` once to log in; subsequent runs stay authenticated.
+BROWSER_PROFILE_DIR = Path.home() / "job-search" / ".browser-profile"
+
 # ── PER-JOB OVERRIDES (module-level, single-threaded safe) ────────────────
 # Populated by _prefill_page before each handler call; read by scroll_and_fill_all.
 _JOB_INFO: dict = {}
@@ -604,35 +608,6 @@ HANDLERS = {
 
 
 # ── MAIN APPLICATION LOOP ─────────────────────────────────────────────────
-def get_chrome_profile_path():
-    """Find the user's real Chrome profile on Mac/Windows/Linux."""
-    import platform, os
-    system = platform.system()
-    home = Path.home()
-    candidates = []
-    if system == "Darwin":   # Mac
-        candidates = [
-            home / "Library/Application Support/Google/Chrome/Default",
-            home / "Library/Application Support/Google/Chrome",
-            home / "Library/Application Support/Chromium/Default",
-        ]
-    elif system == "Windows":
-        local = Path(os.environ.get("LOCALAPPDATA", ""))
-        candidates = [
-            local / "Google/Chrome/User Data/Default",
-            local / "Google/Chrome/User Data",
-        ]
-    else:  # Linux
-        candidates = [
-            home / ".config/google-chrome/Default",
-            home / ".config/chromium/Default",
-        ]
-    for p in candidates:
-        if p.exists():
-            # Playwright wants the parent of "Default", not "Default" itself
-            return str(p.parent) if p.name == "Default" else str(p)
-    return None
-
 
 def _close_context(context):
     """Close a browser context and its backing browser if one was launched for it."""
@@ -652,39 +627,20 @@ def _close_context(context):
 
 def _open_shared_context(playwright, headless=False):
     """
-    Open a single browser context (persistent Chrome profile if available, fresh
-    Chromium otherwise). Returns the context, or None on failure. Caller is
-    responsible for closing via _close_context().
+    Open the persistent Playwright browser profile so authentication sessions
+    (LinkedIn, Greenhouse, Lever, etc.) survive between runs. On first use, run
+    `autofiller.py --login` to log in and save sessions.
     """
-    chrome_profile = get_chrome_profile_path()
-
-    if chrome_profile:
-        try:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=chrome_profile,
-                headless=headless,
-                slow_mo=80,
-                channel="chrome",          # use installed Chrome, not bundled Chromium
-                args=["--no-first-run", "--no-default-browser-check"],
-                viewport={"width": 1280, "height": 900},
-            )
-            log("Using your Chrome profile (auth sessions inherited)", "✓")
-            return context
-        except Exception as e:
-            log(f"Could not load Chrome profile ({e}) — using fresh browser", "!")
-
-    # Fallback: launch a plain Chromium browser
+    BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        browser = playwright.chromium.launch(headless=headless, slow_mo=80)
-        context = browser.new_context(
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(BROWSER_PROFILE_DIR),
+            headless=headless,
+            slow_mo=80,
+            args=["--no-first-run", "--no-default-browser-check"],
             viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
         )
-        log("Using fresh browser — you may need to log in to LinkedIn/Indeed manually", "!")
+        log("Browser ready — sessions loaded from persistent profile", "✓")
         return context
     except Exception as e:
         log(f"Failed to launch browser: {e}", "!")
@@ -956,10 +912,47 @@ def main():
         "--resume", choices=["ic", "manager", "lead"], default=None,
         help="Force a specific resume variant for this session (overrides auto-detection)"
     )
+    parser.add_argument(
+        "--login", action="store_true",
+        help="Open browser to log in to job sites; sessions are saved for future runs"
+    )
     args = parser.parse_args()
 
     if not 1 <= args.batch <= 10:
         parser.error("--batch must be between 1 and 10")
+
+    # ── Login setup mode ───────────────────────────────────────────────────
+    if args.login:
+        LOGIN_URLS = [
+            "https://www.linkedin.com/login",
+            "https://boards.greenhouse.io",
+            "https://jobs.lever.co",
+        ]
+        print("\n🔐 Login Setup — opening job sites in your persistent browser")
+        print("   Log in to each site. Your sessions will be saved automatically.")
+        print("   When you're done with all sites, come back here and press ENTER.\n")
+        BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        with sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(BROWSER_PROFILE_DIR),
+                headless=False,
+                args=["--no-first-run", "--no-default-browser-check"],
+                viewport={"width": 1280, "height": 900},
+            )
+            pages_pool = list(context.pages)
+            for url in LOGIN_URLS:
+                if pages_pool:
+                    page = pages_pool.pop(0)
+                    page.goto(url)
+                else:
+                    context.new_page().goto(url)
+            try:
+                input("   Press ENTER once you've logged in to all sites...\n")
+            except (EOFError, KeyboardInterrupt):
+                pass
+            context.close()
+        print("✅ Sessions saved. Future autofiller runs will stay authenticated.\n")
+        sys.exit(0)
 
     global _RESUME_FORCED
     if args.resume:
