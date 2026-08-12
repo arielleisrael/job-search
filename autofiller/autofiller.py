@@ -45,9 +45,12 @@ def _ensure_anthropic():
     except ImportError:
         if os.environ.get("ANTHROPIC_API_KEY"):
             print("Installing anthropic SDK...")
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "anthropic", "-q"]
-            )
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", "anthropic", "-q"]
+                )
+            except Exception as e:
+                print(f"   ⚠  anthropic install failed: {e} — cover notes will use static fallback")
 
 _ensure_anthropic()
 
