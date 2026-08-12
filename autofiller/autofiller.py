@@ -625,26 +625,41 @@ def _close_context(context):
             pass
 
 
-def _open_shared_context(playwright, headless=False):
+def _launch_persistent_context(playwright, headless=False):
     """
-    Open the persistent Playwright browser profile so authentication sessions
-    (LinkedIn, Greenhouse, Lever, etc.) survive between runs. On first use, run
-    `autofiller.py --login` to log in and save sessions.
+    Launch a persistent Chromium context using our dedicated profile dir.
+    Tries real Chrome first (avoids LinkedIn bot-detection); falls back to
+    Playwright's bundled Chromium if Chrome isn't installed.
     """
     BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    stealth_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+    ]
+    shared_kwargs = dict(
+        user_data_dir=str(BROWSER_PROFILE_DIR),
+        headless=headless,
+        slow_mo=80,
+        args=stealth_args,
+        viewport={"width": 1280, "height": 900},
+    )
     try:
-        context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(BROWSER_PROFILE_DIR),
-            headless=headless,
-            slow_mo=80,
-            args=["--no-first-run", "--no-default-browser-check"],
-            viewport={"width": 1280, "height": 900},
-        )
-        log("Browser ready — sessions loaded from persistent profile", "✓")
-        return context
+        ctx = playwright.chromium.launch_persistent_context(channel="chrome", **shared_kwargs)
+        log("Browser ready (Chrome) — sessions loaded from persistent profile", "✓")
+        return ctx
+    except Exception:
+        pass  # Chrome not installed — fall back to bundled Chromium
+    try:
+        ctx = playwright.chromium.launch_persistent_context(**shared_kwargs)
+        log("Browser ready (Chromium) — sessions loaded from persistent profile", "✓")
+        return ctx
     except Exception as e:
         log(f"Failed to launch browser: {e}", "!")
         return None
+
+
+def _open_shared_context(playwright, headless=False):
+    return _launch_persistent_context(playwright, headless)
 
 
 def _prefill_page(page, job_info):
@@ -931,14 +946,11 @@ def main():
         print("\n🔐 Login Setup — opening job sites in your persistent browser")
         print("   Log in to each site. Your sessions will be saved automatically.")
         print("   When you're done with all sites, come back here and press ENTER.\n")
-        BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(BROWSER_PROFILE_DIR),
-                headless=False,
-                args=["--no-first-run", "--no-default-browser-check"],
-                viewport={"width": 1280, "height": 900},
-            )
+            context = _launch_persistent_context(playwright, headless=False)
+            if context is None:
+                print("❌ Could not open browser. Is Chrome or Chromium installed?")
+                sys.exit(1)
             pages_pool = list(context.pages)
             for url in LOGIN_URLS:
                 if pages_pool:
