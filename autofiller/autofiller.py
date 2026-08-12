@@ -888,13 +888,31 @@ def run_batch_session(playwright, jobs, batch_size=5, headless=False, log_entrie
     return (applied, skipped)
 
 
+def _load_handled_urls():
+    """Return the set of URLs already actioned (applied, skipped, rejected, etc.)."""
+    if not DB_PATH.exists():
+        return set()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute(
+            "SELECT url FROM jobs WHERE status NOT IN ('new')"
+        )
+        urls = {row[0] for row in cur.fetchall()}
+        conn.close()
+        return urls
+    except Exception:
+        return set()
+
+
 def load_jobs_from_csv(csv_path, tier_filter=None, limit=None):
-    """Load job URLs from the agent's output CSV, optionally filtering by tier."""
+    """Load job URLs from the agent's output CSV, filtering out already-handled roles."""
     jobs = []
     path = Path(csv_path)
     if not path.exists():
         print(f"❌ CSV not found: {csv_path}")
         sys.exit(1)
+
+    handled = _load_handled_urls()
 
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -903,8 +921,17 @@ def load_jobs_from_csv(csv_path, tier_filter=None, limit=None):
                 row_tier = row.get("tier", "").upper()
                 if tier_filter.upper() not in row_tier:
                     continue
-            if row.get("url"):
+            url = row.get("url", "")
+            if url and url not in handled:
                 jobs.append(row)
+
+    skipped = 0
+    if handled:
+        # Count how many were filtered (informational)
+        with open(path, newline="", encoding="utf-8") as f:
+            total = sum(1 for r in csv.DictReader(f) if r.get("url") and r["url"] in handled)
+        if total:
+            print(f"   ↩  {total} already-handled role(s) skipped (applied/skipped/rejected)")
 
     if limit:
         jobs = jobs[:limit]
