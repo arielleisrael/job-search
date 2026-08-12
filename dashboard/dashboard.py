@@ -14,7 +14,7 @@ import webbrowser
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs, unquote_plus
+from urllib.parse import parse_qs
 from pathlib import Path
 
 import os as _os
@@ -229,8 +229,8 @@ def make_handler(db_path: str):
                 length = int(self.headers.get("Content-Length", 0))
                 body   = self.rfile.read(length).decode()
                 params = parse_qs(body)
-                url    = unquote_plus(params.get("url",    [""])[0])
-                status = unquote_plus(params.get("status", [""])[0])
+                url    = params.get("url",    [""])[0]
+                status = params.get("status", [""])[0]
                 if url and status in VALID_STATUSES:
                     conn = sqlite3.connect(db_path)
                     conn.execute(
@@ -239,16 +239,9 @@ def make_handler(db_path: str):
                     )
                     conn.commit()
                     conn.close()
-                # Return the updated page directly (200 OK) so the browser
-                # sees the refreshed Kanban without a second round-trip.
-                # Using 200 instead of 302 avoids the Post-Redirect-Get race
-                # when the server is run single-threaded (handle_request).
-                html = build_page(db_path).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(html)))
+                self.send_response(302)
+                self.send_header("Location", "/")
                 self.end_headers()
-                self.wfile.write(html)
             else:
                 self.send_error(404)
 

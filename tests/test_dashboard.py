@@ -3,9 +3,7 @@ import sys
 import sqlite3
 import tempfile
 import threading
-import urllib.request
 import urllib.parse
-import urllib.error
 from http.server import HTTPServer
 from pathlib import Path
 
@@ -86,24 +84,25 @@ def test_post_update_changes_status():
         t.daemon = True
         t.start()
 
+        import http.client
         data = urllib.parse.urlencode(
             {"url": "http://ex.com/1", "status": "responded"}
         ).encode()
-        try:
-            urllib.request.urlopen(
-                "http://127.0.0.1:18787/update", data=data, timeout=3
-            )
-        except urllib.error.HTTPError:
-            pass  # 302 redirect raises HTTPError — that's expected
+        conn = http.client.HTTPConnection("127.0.0.1", 18787, timeout=3)
+        conn.request("POST", "/update", body=data,
+                     headers={"Content-Type": "application/x-www-form-urlencoded"})
+        resp = conn.getresponse()
+        resp.read()  # drain response body
+        conn.close()
 
         t.join(timeout=2)
         server.server_close()
 
-        conn = sqlite3.connect(db)
-        row = conn.execute(
+        db_conn = sqlite3.connect(db)
+        row = db_conn.execute(
             "SELECT status FROM jobs WHERE url='http://ex.com/1'"
         ).fetchone()
-        conn.close()
+        db_conn.close()
         assert row[0] == "responded"
     finally:
         os.unlink(db)
