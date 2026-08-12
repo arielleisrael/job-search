@@ -73,10 +73,23 @@ def write_session_log(log_path, entries):
     Path(log_path).parent.mkdir(parents=True, exist_ok=True)
     fieldnames = ["timestamp", "action", "title", "company", "source", "score", "url"]
     with open(log_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for entry in entries:
             writer.writerow(entry)
+
+
+def _log_entry(job, action):
+    """Build a session-log dict for one job action."""
+    return {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "action":    action,
+        "title":     job.get("title", ""),
+        "company":   job.get("company", ""),
+        "source":    job.get("source", ""),
+        "score":     job.get("score", ""),
+        "url":       job.get("url", ""),
+    }
 
 
 # ── YOUR PROFILE ───────────────────────────────────────────────────────────
@@ -350,8 +363,18 @@ def auto_advance_pages(page, max_steps=8):
         if next_btn is None:
             break
 
-        next_btn.click()
+        prev_url = page.url
+
+        try:
+            next_btn.click()
+        except Exception:
+            break  # failed to click, treat current page as final
+
         page.wait_for_timeout(1800)
+
+        if page.url == prev_url:
+            break  # stuck on the same page (validation error etc.) — treat as final
+
         scroll_and_fill_all(page)
         steps += 1
         log(f"Auto-advanced to page {steps + 1}", "➡")
@@ -503,15 +526,11 @@ def get_chrome_profile_path():
     return None
 
 
-# Maps context id → backing browser (used when context is non-persistent)
-_context_browsers: dict = {}
-
-
 def _close_context(context):
     """Close a browser context and its backing browser if one was launched for it."""
     if context is None:
         return
-    browser = _context_browsers.pop(id(context), None)
+    browser = context.browser  # None for persistent contexts
     try:
         context.close()
     except Exception:
@@ -557,7 +576,6 @@ def _open_shared_context(playwright, headless=False):
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
         )
-        _context_browsers[id(context)] = browser  # track for cleanup
         log("Using fresh browser — you may need to log in to LinkedIn/Indeed manually", "!")
         return context
     except Exception as e:
@@ -617,8 +635,8 @@ def run_application(playwright, url, job_info=None, headless=False):
     context, page, url = run_application_prefill(playwright, job_info, headless)
 
     if context is None:
-        log("Failed to open application — skipping", "!")
-        return "s"
+        log("Failed to open application — browser error, will retry next run", "!")
+        return None  # not a user action; do not write to DB
 
     # ── Hand control to user ───────────────────────────────────────────────
     print()
@@ -663,25 +681,13 @@ def run_batch_session(playwright, jobs, batch_size=5, headless=False, log_entrie
         shared_context = _open_shared_context(playwright, headless)
         if shared_context is None:
             log("Could not open browser for this batch — skipping all jobs in chunk", "!")
-            for job in chunk:
-                tab_url = job.get("url", "")
-                if tab_url:
-                    skipped += 1
-                    update_job_status(tab_url, "skipped")
-                    if log_entries is not None:
-                        log_entries.append({
-                            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                            "action": "skipped",
-                            "title": job.get("title", ""),
-                            "company": job.get("company", ""),
-                            "source": job.get("source", ""),
-                            "score": job.get("score", ""),
-                            "url": tab_url,
-                        })
             continue
 
         # ── Pre-fill each job as a new page inside the shared context ─────
         open_tabs = []  # list of (page_or_None, url, job)
+        # Persistent contexts open with one about:blank page already.  Reuse it
+        # for the first job so Chrome shows it as tab 1, not tab 2.
+        pages_pool = list(shared_context.pages)
 
         for job in chunk:
             tab_url = job.get("url", "")
@@ -689,7 +695,10 @@ def run_batch_session(playwright, jobs, batch_size=5, headless=False, log_entrie
                 continue
             print(f"\n  Pre-filling: {job.get('title', 'Role')} @ {job.get('company', '')}...")
             try:
-                page = shared_context.new_page()
+                if pages_pool:
+                    page = pages_pool.pop(0)
+                else:
+                    page = shared_context.new_page()
                 _prefill_page(page, job)
                 open_tabs.append((page, tab_url, job))
             except Exception as e:
@@ -734,18 +743,6 @@ def run_batch_session(playwright, jobs, batch_size=5, headless=False, log_entrie
 
             if page is None:
                 print(f"\n  Tab {tab_idx} ({tab_label}) — failed to open, skipping.")
-                skipped += 1
-                update_job_status(tab_url, "skipped")
-                if log_entries is not None:
-                    log_entries.append({
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        "action": "skipped",
-                        "title": job.get("title", ""),
-                        "company": job.get("company", ""),
-                        "source": job.get("source", ""),
-                        "score": job.get("score", ""),
-                        "url": tab_url,
-                    })
                 continue
 
             print(f"\n  Tab {tab_idx} ({tab_label})")
@@ -775,29 +772,13 @@ def run_batch_session(playwright, jobs, batch_size=5, headless=False, log_entrie
                 update_job_status(tab_url, "skipped")
                 skipped += 1
                 if log_entries is not None:
-                    log_entries.append({
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        "action": "skipped",
-                        "title": job.get("title", ""),
-                        "company": job.get("company", ""),
-                        "source": job.get("source", ""),
-                        "score": job.get("score", ""),
-                        "url": tab_url,
-                    })
+                    log_entries.append(_log_entry(job, "skipped"))
                 print("  Skipped.")
             else:
                 update_job_status(tab_url, "applied")
                 applied += 1
                 if log_entries is not None:
-                    log_entries.append({
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        "action": "applied",
-                        "title": job.get("title", ""),
-                        "company": job.get("company", ""),
-                        "source": job.get("source", ""),
-                        "score": job.get("score", ""),
-                        "url": tab_url,
-                    })
+                    log_entries.append(_log_entry(job, "applied"))
                 print(f"  ✅ Application {applied} submitted.")
 
             try:
@@ -911,34 +892,20 @@ def main():
                 print(f"\n[{i}/{len(jobs)}] Opening application...")
                 result = run_application(playwright, url, job_info=job, headless=args.headless)
 
-                if result == "q":
+                if result is None:
+                    continue  # browser error — job stays pending, no DB write
+                elif result == "q":
                     print("\n  Session ended by user.")
                     break
                 elif result == "s":
                     skipped += 1
                     update_job_status(url, "skipped")
-                    log_entries.append({
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        "action": "skipped",
-                        "title": job.get("title", ""),
-                        "company": job.get("company", ""),
-                        "source": job.get("source", ""),
-                        "score": job.get("score", ""),
-                        "url": url,
-                    })
+                    log_entries.append(_log_entry(job, "skipped"))
                     print("  Skipped.")
                 else:
                     applied += 1
                     update_job_status(url, "applied")
-                    log_entries.append({
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        "action": "applied",
-                        "title": job.get("title", ""),
-                        "company": job.get("company", ""),
-                        "source": job.get("source", ""),
-                        "score": job.get("score", ""),
-                        "url": url,
-                    })
+                    log_entries.append(_log_entry(job, "applied"))
                     print(f"  ✅ Application {applied} submitted.")
 
                 # Brief pause between applications
