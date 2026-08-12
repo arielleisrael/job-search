@@ -63,6 +63,35 @@ def update_job_status(url, status):
     except Exception as e:
         print(f"  ⚠ DB update failed: {e}", file=sys.stderr)
 
+
+def write_session_log(log_path, entries):
+    """
+    Write session log entries to a CSV file.
+    entries: list of dicts with keys: timestamp, action, title, company, source, score, url
+    Creates logs/ directory if it doesn't exist.
+    """
+    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["timestamp", "action", "title", "company", "source", "score", "url"]
+    with open(log_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for entry in entries:
+            writer.writerow(entry)
+
+
+def _log_entry(job, action):
+    """Build a session-log dict for one job action."""
+    return {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "action":    action,
+        "title":     job.get("title", ""),
+        "company":   job.get("company", ""),
+        "source":    job.get("source", ""),
+        "score":     job.get("score", ""),
+        "url":       job.get("url", ""),
+    }
+
+
 # ── YOUR PROFILE ───────────────────────────────────────────────────────────
 # Update these once. They feed every form field automatically.
 PROFILE = {
@@ -293,6 +322,66 @@ def scroll_and_fill_all(page):
     return filled
 
 
+def auto_advance_pages(page, max_steps=8):
+    """
+    After filling a form page, detect and click Next/Continue if present.
+    Stops when no Next button is found (final page) or max_steps is reached.
+    Never clicks Submit, Apply, or Send buttons — those stay for the user.
+    Returns the number of pages advanced (0 = already on final page).
+    """
+    NEXT_SELECTORS = [
+        'button:has-text("Next")',
+        'button:has-text("Continue")',
+        'button:has-text("Next Step")',
+        'button:has-text("Save and Continue")',
+        'input[type="submit"][value*="Next" i]',
+        'input[type="submit"][value*="Continue" i]',
+    ]
+    STOP_WORDS = ["submit", "apply", "send application", "review application", "finish"]
+
+    steps = 0
+    for _ in range(max_steps):
+        next_btn = None
+        for selector in NEXT_SELECTORS:
+            try:
+                el = page.locator(selector).first
+                if el.count() and el.is_visible(timeout=2000):
+                    # Check stop words against the button's text content or value
+                    try:
+                        btn_text = el.evaluate(
+                            "el => (el.textContent || el.value || '').toLowerCase().trim()"
+                        )
+                    except Exception:
+                        btn_text = ""
+                    if any(sw in btn_text for sw in STOP_WORDS):
+                        return steps
+                    next_btn = el
+                    break
+            except Exception:
+                continue
+
+        if next_btn is None:
+            break
+
+        prev_url = page.url
+
+        try:
+            next_btn.click()
+        except Exception:
+            break  # failed to click, treat current page as final
+
+        page.wait_for_timeout(1800)
+
+        if page.url == prev_url:
+            break  # stuck on the same page (validation error etc.) — treat as final
+
+        scroll_and_fill_all(page)
+        steps += 1
+        log(f"Auto-advanced to page {steps + 1}", "➡")
+
+    return steps
+
+
 # ── PLATFORM-SPECIFIC HANDLERS ─────────────────────────────────────────────
 
 def handle_linkedin(page, url):
@@ -325,6 +414,7 @@ def handle_greenhouse(page, url):
     page.goto(url, wait_until="domcontentloaded")
     page.wait_for_timeout(2000)
     scroll_and_fill_all(page)
+    auto_advance_pages(page)
     log("Fields pre-filled. Review and submit when ready.", "👀")
 
 
@@ -334,6 +424,7 @@ def handle_lever(page, url):
     page.goto(url, wait_until="domcontentloaded")
     page.wait_for_timeout(2000)
     scroll_and_fill_all(page)
+    auto_advance_pages(page)
     log("Fields pre-filled. Review and submit when ready.", "👀")
 
 
@@ -358,6 +449,7 @@ def handle_indeed(page, url):
         pass
 
     scroll_and_fill_all(page)
+    auto_advance_pages(page)
     log("Fields pre-filled. Review and submit when ready.", "👀")
 
 
@@ -381,6 +473,7 @@ def handle_generic(page, url):
         pass
 
     scroll_and_fill_all(page)
+    auto_advance_pages(page)
     log("Fields pre-filled. Review and submit when ready.", "👀")
 
 
@@ -433,14 +526,29 @@ def get_chrome_profile_path():
     return None
 
 
-def run_application(playwright, url, job_info=None, headless=False):
-    """Open one job application, pre-fill, and wait for user to submit."""
+def _close_context(context):
+    """Close a browser context and its backing browser if one was launched for it."""
+    if context is None:
+        return
+    browser = context.browser  # None for persistent contexts
+    try:
+        context.close()
+    except Exception:
+        pass
+    if browser:
+        try:
+            browser.close()
+        except Exception:
+            pass
 
-    # Try to use the real Chrome profile so LinkedIn/Indeed auth is inherited.
-    # Falls back to a fresh browser if the profile can't be used.
+
+def _open_shared_context(playwright, headless=False):
+    """
+    Open a single browser context (persistent Chrome profile if available, fresh
+    Chromium otherwise). Returns the context, or None on failure. Caller is
+    responsible for closing via _close_context().
+    """
     chrome_profile = get_chrome_profile_path()
-    context = None
-    browser = None
 
     if chrome_profile:
         try:
@@ -453,12 +561,12 @@ def run_application(playwright, url, job_info=None, headless=False):
                 viewport={"width": 1280, "height": 900},
             )
             log("Using your Chrome profile (auth sessions inherited)", "✓")
+            return context
         except Exception as e:
             log(f"Could not load Chrome profile ({e}) — using fresh browser", "!")
-            context = None
 
-    if context is None:
-        # Fallback: launch a plain Chromium browser
+    # Fallback: launch a plain Chromium browser
+    try:
         browser = playwright.chromium.launch(headless=headless, slow_mo=80)
         context = browser.new_context(
             viewport={"width": 1280, "height": 900},
@@ -469,19 +577,66 @@ def run_application(playwright, url, job_info=None, headless=False):
             ),
         )
         log("Using fresh browser — you may need to log in to LinkedIn/Indeed manually", "!")
+        return context
+    except Exception as e:
+        log(f"Failed to launch browser: {e}", "!")
+        return None
 
-    page = context.new_page()
 
-    if job_info:
+def _prefill_page(page, job_info):
+    """
+    Navigate to job_info['url'] and pre-fill the form on an already-open page.
+    Prints the job header and calls the appropriate platform handler.
+    """
+    url = job_info.get("url", "") if isinstance(job_info, dict) else str(job_info)
+
+    if isinstance(job_info, dict) and (job_info.get("title") or job_info.get("company")):
         print(f"\n{'─'*60}")
-        print(f"  {job_info.get('title','Role')} @ {job_info.get('company','')}")
-        print(f"  Score: {job_info.get('score','?')}/100  |  {job_info.get('source','')}")
+        print(f"  {job_info.get('title', 'Role')} @ {job_info.get('company', '')}")
+        print(f"  Score: {job_info.get('score', '?')}/100  |  {job_info.get('source', '')}")
         print(f"  {url}")
         print(f"{'─'*60}")
 
     platform = detect_platform(url)
     handler = HANDLERS[platform]
     handler(page, url)
+
+
+def run_application_prefill(playwright, job_info, headless=False):
+    """
+    Open a browser context for job_info['url'], pre-fill the form.
+    Returns the (context, page, url) tuple — caller is responsible for close.
+    Returns (None, None, url) on failure.
+    """
+    url = job_info.get("url", "") if isinstance(job_info, dict) else str(job_info)
+
+    context = _open_shared_context(playwright, headless)
+    if context is None:
+        return (None, None, url)
+
+    try:
+        page = context.new_page()
+        _prefill_page(page, job_info)
+        return (context, page, url)
+    except Exception as e:
+        log(f"Error pre-filling application: {e}", "!")
+        _close_context(context)
+        return (None, None, url)
+
+
+def run_application(playwright, url, job_info=None, headless=False):
+    """Open one job application, pre-fill, and wait for user to submit."""
+    if job_info is None:
+        job_info = {"url": url, "title": "Role", "company": "", "score": "?", "source": ""}
+    else:
+        job_info = dict(job_info)
+        job_info.setdefault("url", url)
+
+    context, page, url = run_application_prefill(playwright, job_info, headless)
+
+    if context is None:
+        log("Failed to open application — browser error, will retry next run", "!")
+        return None  # not a user action; do not write to DB
 
     # ── Hand control to user ───────────────────────────────────────────────
     print()
@@ -500,10 +655,144 @@ def run_application(playwright, url, job_info=None, headless=False):
     except (EOFError, KeyboardInterrupt):
         response = "q"
 
-    context.close()
-    if browser:
-        browser.close()
+    _close_context(context)
     return response  # "", "s" (skip), or "q" (quit)
+
+
+def run_batch_session(playwright, jobs, batch_size=5, headless=False, log_entries=None):
+    """
+    Open up to `batch_size` jobs simultaneously in a shared browser context,
+    pre-fill each as a separate page, then let the user cycle through and submit.
+    Returns (applied, skipped).
+    If log_entries list is provided, batch appends action dicts to it in-place.
+    """
+    applied = 0
+    skipped = 0
+    total_batches = (len(jobs) + batch_size - 1) // batch_size
+
+    for batch_num, chunk_start in enumerate(range(0, len(jobs), batch_size), 1):
+        chunk = jobs[chunk_start: chunk_start + batch_size]
+        n = len(chunk)
+
+        # ── Open ONE shared context for the whole chunk ────────────────────
+        # A single launch_persistent_context call avoids the Chrome profile
+        # filesystem lock that would prevent a second context from inheriting auth.
+        print(f"\n  Opening {n} application(s) in batch {batch_num} of {total_batches}...")
+        shared_context = _open_shared_context(playwright, headless)
+        if shared_context is None:
+            log("Could not open browser for this batch — skipping all jobs in chunk", "!")
+            continue
+
+        # ── Pre-fill each job as a new page inside the shared context ─────
+        open_tabs = []  # list of (page_or_None, url, job)
+        # Persistent contexts open with one about:blank page already.  Reuse it
+        # for the first job so Chrome shows it as tab 1, not tab 2.
+        pages_pool = list(shared_context.pages)
+
+        for job in chunk:
+            tab_url = job.get("url", "")
+            if not tab_url:
+                continue
+            print(f"\n  Pre-filling: {job.get('title', 'Role')} @ {job.get('company', '')}...")
+            try:
+                if pages_pool:
+                    page = pages_pool.pop(0)
+                else:
+                    page = shared_context.new_page()
+                _prefill_page(page, job)
+                open_tabs.append((page, tab_url, job))
+            except Exception as e:
+                log(f"Error pre-filling {tab_url}: {e}", "!")
+                open_tabs.append((None, tab_url, job))
+
+        if not open_tabs:
+            _close_context(shared_context)
+            continue
+
+        # ── Print batch summary table ──────────────────────────────────────
+        W = 54  # inner width of the box
+        n_open = len(open_tabs)
+        header_text = (
+            f"  Batch {batch_num} of {total_batches}"
+            f"  —  {n_open} tab{'s' if n_open != 1 else ''} pre-filled and waiting  "
+        )
+        print(f"\n  ┌{'─' * W}┐")
+        print(f"  │{header_text[:W].ljust(W)}│")
+        print(f"  ├{'─' * W}┤")
+
+        for tab_idx, (pg, tab_url, job) in enumerate(open_tabs, 1):
+            title = (job.get("title") or "Role")[:24]
+            company = (job.get("company") or "")[:14]
+            pname = detect_platform(tab_url).capitalize()
+            bracket = f"[{pname}]"
+            left = f"  Tab {tab_idx}: {title} @ {company}"
+            gap = max(1, W - len(left) - len(bracket))
+            row = (left + " " * gap + bracket)[:W].ljust(W)
+            print(f"  │{row}│")
+
+        print(f"  └{'─' * W}┘")
+        print(f"\n  Switch to Tab 1 in your browser, review and submit, then come back here.")
+
+        # ── Process each tab in sequence; close each page after user action ─
+        quit_session = False
+        for i, (page, tab_url, job) in enumerate(open_tabs):
+            tab_idx = i + 1
+            title = (job.get("title") or "Role")
+            company = (job.get("company") or "")
+            tab_label = f"{title} @ {company}" if company else title
+
+            if page is None:
+                print(f"\n  Tab {tab_idx} ({tab_label}) — failed to open, skipping.")
+                continue
+
+            print(f"\n  Tab {tab_idx} ({tab_label})")
+            print(
+                f"  Press ENTER when submitted, 's' to skip, 'q' to quit: ",
+                end="", flush=True,
+            )
+            try:
+                response = input().strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                response = "q"
+
+            if response == "q":
+                try:
+                    page.close()
+                except Exception:
+                    pass
+                for remaining_page, _, _ in open_tabs[i + 1:]:
+                    if remaining_page is not None:
+                        try:
+                            remaining_page.close()
+                        except Exception:
+                            pass
+                quit_session = True
+                break
+            elif response == "s":
+                update_job_status(tab_url, "skipped")
+                skipped += 1
+                if log_entries is not None:
+                    log_entries.append(_log_entry(job, "skipped"))
+                print("  Skipped.")
+            else:
+                update_job_status(tab_url, "applied")
+                applied += 1
+                if log_entries is not None:
+                    log_entries.append(_log_entry(job, "applied"))
+                print(f"  ✅ Application {applied} submitted.")
+
+            try:
+                page.close()
+            except Exception:
+                pass
+
+        # Close the shared context after all pages in this chunk are done
+        _close_context(shared_context)
+
+        if quit_session:
+            break
+
+    return (applied, skipped)
 
 
 def load_jobs_from_csv(csv_path, tier_filter=None, limit=None):
@@ -539,7 +828,12 @@ def main():
                         help="Max number of applications to run")
     parser.add_argument("--headless", action="store_true",
                         help="Run browser in headless mode (not recommended)")
+    parser.add_argument("--batch", type=int, default=5, metavar="N",
+                        help="Open N applications simultaneously (default: 5; 1 = sequential mode)")
     args = parser.parse_args()
+
+    if not 1 <= args.batch <= 10:
+        parser.error("--batch must be between 1 and 10")
 
     if not args.jobs and not args.url:
         parser.print_help()
@@ -559,6 +853,8 @@ def main():
     print(f"   {len(jobs)} application(s) queued")
     if args.tier:
         print(f"   Filter: {args.tier} fit only")
+    mode_label = f"Batch (size {args.batch})" if args.batch > 1 else "Sequential"
+    print(f"   Mode: {mode_label}")
     print(f"\n   ⚠  You will review and submit each one yourself.")
     print(f"   ⚠  Update PROFILE['resume_path'] before running if needed.")
     print(f"\n   Resume: {PROFILE['resume_path']}")
@@ -568,40 +864,71 @@ def main():
     print()
     input("   Press ENTER to begin, or Ctrl+C to cancel...\n")
 
+    session_start = time.time()
+    log_entries = []
+    log_path = (
+        Path(__file__).parent.parent
+        / "logs"
+        / f"session_{time.strftime('%Y-%m-%d_%H%M', time.localtime(session_start))}.csv"
+    )
+
     applied = 0
     skipped = 0
 
     with sync_playwright() as playwright:
-        for i, job in enumerate(jobs, 1):
-            url = job.get("url", "")
-            if not url:
-                continue
+        if args.batch > 1:
+            app, skip = run_batch_session(
+                playwright, jobs, batch_size=args.batch, headless=args.headless,
+                log_entries=log_entries,
+            )
+            applied += app
+            skipped += skip
+        else:
+            for i, job in enumerate(jobs, 1):
+                url = job.get("url", "")
+                if not url:
+                    continue
 
-            print(f"\n[{i}/{len(jobs)}] Opening application...")
-            result = run_application(playwright, url, job_info=job, headless=args.headless)
+                print(f"\n[{i}/{len(jobs)}] Opening application...")
+                result = run_application(playwright, url, job_info=job, headless=args.headless)
 
-            if result == "q":
-                print("\n  Session ended by user.")
-                break
-            elif result == "s":
-                skipped += 1
-                update_job_status(url, "skipped")
-                print("  Skipped.")
-            else:
-                applied += 1
-                update_job_status(url, "applied")
-                print(f"  ✅ Application {applied} submitted.")
+                if result is None:
+                    continue  # browser error — job stays pending, no DB write
+                elif result == "q":
+                    print("\n  Session ended by user.")
+                    break
+                elif result == "s":
+                    skipped += 1
+                    update_job_status(url, "skipped")
+                    log_entries.append(_log_entry(job, "skipped"))
+                    print("  Skipped.")
+                else:
+                    applied += 1
+                    update_job_status(url, "applied")
+                    log_entries.append(_log_entry(job, "applied"))
+                    print(f"  ✅ Application {applied} submitted.")
 
-            # Brief pause between applications
-            if i < len(jobs) and result not in ("q",):
-                print(f"\n  Pausing 3 seconds before next application...")
-                time.sleep(3)
+                # Brief pause between applications
+                if i < len(jobs) and result not in ("q",):
+                    print(f"\n  Pausing 3 seconds before next application...")
+                    time.sleep(3)
+
+    session_end = time.time()
+    write_session_log(log_path, log_entries)
+    total_reviewed = applied + skipped
+    log_rel = f"logs/{log_path.name}"
 
     print(f"\n{'='*60}")
     print(f"  Session complete!")
     print(f"  ✅ Submitted: {applied}")
     print(f"  ⏭  Skipped:   {skipped}")
-    print(f"  📊 Log these in your dashboard!")
+    print(f"  📋 Session log: {log_rel}")
+    print(f"     Applied: {applied} | Skipped: {skipped} | Total reviewed: {total_reviewed}")
+    if total_reviewed > 0:
+        avg_secs = (session_end - session_start) / total_reviewed
+        avg_min = int(avg_secs // 60)
+        avg_sec = int(avg_secs % 60)
+        print(f"     Avg time per application: {avg_min}m {avg_sec}s")
     print(f"{'='*60}\n")
 
 
