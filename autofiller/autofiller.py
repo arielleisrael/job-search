@@ -23,6 +23,7 @@ import time
 import argparse
 import subprocess
 import os
+import importlib
 import sqlite3
 from pathlib import Path
 
@@ -49,6 +50,7 @@ def _ensure_anthropic():
                 subprocess.check_call(
                     [sys.executable, "-m", "pip", "install", "anthropic", "-q"]
                 )
+                importlib.invalidate_caches()
             except Exception as e:
                 print(f"   ⚠  anthropic install failed: {e} — cover notes will use static fallback")
 
@@ -180,10 +182,13 @@ def pick_resume(title: str) -> str:
     """Return the absolute path to the best resume PDF for this job title."""
     if _RESUME_FORCED:
         return _RESUME_FORCED
-    t = title.lower()
+    t = (title or "").lower()
     for keyword, filename in RESUME_VARIANTS.items():
         if keyword in t:
-            return str(RESUME_BASE / filename)
+            path = str(RESUME_BASE / filename)
+            if Path(path).exists():
+                return path
+            break  # matched but missing — fall through to default
     return str(RESUME_BASE / RESUME_DEFAULT)
 
 
@@ -405,9 +410,10 @@ def handle_yes_no_radios(page):
 
 def scroll_and_fill_all(page):
     """Walk through FIELD_MAP and fill whatever fields are on the page."""
-    # Per-job overrides — PROFILE is never mutated
     if _JOB_INFO and _anthropic and os.environ.get("ANTHROPIC_API_KEY"):
-        cover_note = pick_cover_note(page, _JOB_INFO)
+        if "cover_note" not in _JOB_INFO:
+            _JOB_INFO["cover_note"] = pick_cover_note(page, _JOB_INFO)
+        cover_note = _JOB_INFO["cover_note"]
     else:
         cover_note = PROFILE["cover_note"]
     resume_path = _JOB_INFO.get("resume_path") or PROFILE["resume_path"]

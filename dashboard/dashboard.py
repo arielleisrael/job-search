@@ -13,6 +13,7 @@ import sqlite3
 import webbrowser
 import threading
 import time
+from html import escape
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs
 from pathlib import Path
@@ -51,13 +52,14 @@ def _query(db_path, sql, params=()):
 
 
 def _card(job):
-    url     = job["url"]
-    title   = job.get("title") or "Role"
-    company = job.get("company") or ""
-    acted   = job.get("date_acted") or job.get("date_seen") or ""
+    url_raw = str(job.get("url") or "")
+    title   = escape(str(job.get("title") or "Role"))
+    company = escape(str(job.get("company") or ""))
+    acted   = escape(str(job.get("date_acted") or job.get("date_seen") or ""))
     tier    = (job.get("tier") or "").upper().replace("\U0001f7e2", "").replace("\U0001f7e1", "").replace("\U0001f7e0", "").strip()
-    score   = job.get("score") or ""
+    score   = escape(str(job.get("score") or ""))
     status  = job.get("status", "")
+    url_esc = escape(url_raw, quote=True)
 
     tier_clean = tier.split()[0] if tier else ""
     badge_color = TIER_COLORS.get(tier_clean, "#6b7280")
@@ -66,7 +68,7 @@ def _card(job):
     for new_status, label in NEXT_ACTIONS.get(status, []):
         buttons_html += (
             f'<form method="POST" action="/update" style="display:inline">'
-            f'<input type="hidden" name="url" value="{url}">'
+            f'<input type="hidden" name="url" value="{url_esc}">'
             f'<input type="hidden" name="status" value="{new_status}">'
             f'<button type="submit" class="btn btn-{new_status}">{label}</button>'
             f'</form>'
@@ -78,7 +80,7 @@ def _card(job):
     <span class="company">{company}</span>
     <span class="badge" style="background:{badge_color}">{score}</span>
   </div>
-  <div class="title"><a href="{url}" target="_blank">{title}</a></div>
+  <div class="title"><a href="{url_esc}" target="_blank">{title}</a></div>
   <div class="date">{acted}</div>
   <div class="card-actions">{buttons_html}</div>
 </div>"""
@@ -128,7 +130,7 @@ def build_page(db_path: str) -> str:
         "GROUP BY source ORDER BY n DESC"
     )
     source_html = "".join(
-        f"<tr><td>{r['source']}</td><td>{r['n']}</td></tr>"
+        f"<tr><td>{escape(str(r['source']))}</td><td>{r['n']}</td></tr>"
         for r in source_rows
     )
 

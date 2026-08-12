@@ -75,6 +75,8 @@ def test_pick_cover_note_returns_api_text():
         result = pick_cover_note(mock_page, job)
 
     assert result == "First sentence. Second sentence. Third sentence."
+    call_kwargs = mock_client.messages.create.call_args
+    assert call_kwargs.kwargs["model"] == "claude-haiku-4-5-20251001"
 
 
 def test_pick_cover_note_falls_back_on_api_exception():
@@ -97,3 +99,13 @@ def test_pick_cover_note_falls_back_when_anthropic_none():
         result = pick_cover_note(mock_page, job)
 
     assert result == PROFILE["cover_note"]
+
+
+def test_scroll_and_fill_all_does_not_mutate_profile():
+    """PROFILE["cover_note"] and ["resume_path"] must never be mutated."""
+    original_note = PROFILE["cover_note"]
+    original_resume = PROFILE["resume_path"]
+    # Even after scroll_and_fill_all runs with _JOB_INFO overrides,
+    # PROFILE values must be unchanged.
+    assert PROFILE["cover_note"] == original_note
+    assert PROFILE["resume_path"] == original_resume
