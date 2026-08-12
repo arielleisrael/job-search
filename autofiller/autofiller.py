@@ -38,6 +38,24 @@ def ensure_playwright():
 
 ensure_playwright()
 
+
+def _ensure_anthropic():
+    try:
+        import anthropic  # noqa: F401
+    except ImportError:
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            print("Installing anthropic SDK...")
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "anthropic", "-q"]
+            )
+
+_ensure_anthropic()
+
+try:
+    import anthropic as _anthropic
+except ImportError:
+    _anthropic = None
+
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 DB_PATH = Path(__file__).parent.parent / "applied_jobs.db"
@@ -164,6 +182,44 @@ def pick_resume(title: str) -> str:
         if keyword in t:
             return str(RESUME_BASE / filename)
     return str(RESUME_BASE / RESUME_DEFAULT)
+
+
+def pick_cover_note(page, job: dict) -> str:
+    """
+    Scrape the job page already open in `page` and call the Claude API to generate
+    a 3-sentence tailored cover note. Falls back to PROFILE["cover_note"] on any
+    API error or when _anthropic is not available.
+    """
+    if _anthropic is None:
+        return PROFILE["cover_note"]
+    try:
+        body_text = page.inner_text("body")[:3000]
+        title   = job.get("title", "")
+        company = job.get("company", "")
+        client  = _anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            system=(
+                "You are writing a cover note for a job application. "
+                "Write exactly 3 sentences. "
+                "Tone: confident, specific, no filler phrases. "
+                "Output only the 3 sentences, no preamble."
+            ),
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Candidate: Arielle Israel, QE leader, 17+ years, specializes in "
+                    f"Playwright/Cypress/Appium, web + mobile automation, CI/CD, team leadership.\n"
+                    f"Job title: {title} at {company}.\n"
+                    f"Job description excerpt: {body_text}"
+                ),
+            }],
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        print(f"  ⚠ Cover note generation failed: {e} — using default note")
+        return PROFILE["cover_note"]
 
 
 # ── FIELD MATCHERS ─────────────────────────────────────────────────────────
@@ -346,11 +402,18 @@ def handle_yes_no_radios(page):
 
 def scroll_and_fill_all(page):
     """Walk through FIELD_MAP and fill whatever fields are on the page."""
+    # Per-job overrides — PROFILE is never mutated
+    if _JOB_INFO and _anthropic and os.environ.get("ANTHROPIC_API_KEY"):
+        cover_note = pick_cover_note(page, _JOB_INFO)
+    else:
+        cover_note = PROFILE["cover_note"]
     resume_path = _JOB_INFO.get("resume_path") or PROFILE["resume_path"]
 
     filled = 0
     for label_patterns, value in FIELD_MAP:
-        if find_and_fill_by_label(page, label_patterns, value):
+        # Swap in the per-job cover note for the cover letter field
+        actual_value = cover_note if value == PROFILE["cover_note"] else value
+        if find_and_fill_by_label(page, label_patterns, actual_value):
             filled += 1
             time.sleep(0.3)
     handle_yes_no_radios(page)
@@ -901,6 +964,13 @@ def main():
     ]:
         if not Path(path).exists():
             print(f"   ⚠  {label} resume not found: {path}")
+
+    if _anthropic is None:
+        print("   ⚠  anthropic package not installed — cover notes will use static fallback")
+    elif not os.environ.get("ANTHROPIC_API_KEY"):
+        print("   ⚠  ANTHROPIC_API_KEY not set — cover notes will use static fallback")
+    else:
+        print("   ✅ Claude API ready — cover notes will be tailored per job")
 
     if not args.jobs and not args.url:
         parser.print_help()

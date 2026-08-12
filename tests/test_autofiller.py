@@ -1,10 +1,12 @@
 import sys
+import os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "autofiller"))
 
 import pytest
+from unittest.mock import patch, MagicMock
 import autofiller
-from autofiller import pick_resume, RESUME_DEFAULT, RESUME_VARIANTS, RESUME_BASE
+from autofiller import pick_resume, pick_cover_note, RESUME_DEFAULT, RESUME_VARIANTS, RESUME_BASE, PROFILE
 
 
 @pytest.fixture(autouse=True)
@@ -55,3 +57,43 @@ def test_pick_resume_forced_overrides_keyword():
     # title would normally match IC track (default)
     result = pick_resume("Senior Quality Engineer")
     assert result == forced_path
+
+
+def test_pick_cover_note_returns_api_text():
+    mock_page = MagicMock()
+    mock_page.inner_text.return_value = "We are building great software and need a QE Lead."
+    job = {"title": "QE Lead", "company": "Acme Corp"}
+
+    mock_msg = MagicMock()
+    mock_msg.content = [MagicMock(text="  First sentence. Second sentence. Third sentence.  ")]
+
+    with patch("autofiller._anthropic") as mock_anthropic:
+        mock_client = MagicMock()
+        mock_anthropic.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = mock_msg
+
+        result = pick_cover_note(mock_page, job)
+
+    assert result == "First sentence. Second sentence. Third sentence."
+
+
+def test_pick_cover_note_falls_back_on_api_exception():
+    mock_page = MagicMock()
+    mock_page.inner_text.return_value = "Job description text"
+    job = {"title": "QE Lead", "company": "Acme Corp"}
+
+    with patch("autofiller._anthropic") as mock_anthropic:
+        mock_anthropic.Anthropic.side_effect = Exception("network error")
+        result = pick_cover_note(mock_page, job)
+
+    assert result == PROFILE["cover_note"]
+
+
+def test_pick_cover_note_falls_back_when_anthropic_none():
+    mock_page = MagicMock()
+    job = {"title": "QE Lead", "company": "Acme Corp"}
+
+    with patch("autofiller._anthropic", None):
+        result = pick_cover_note(mock_page, job)
+
+    assert result == PROFILE["cover_note"]
