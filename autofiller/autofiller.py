@@ -22,6 +22,8 @@ import csv
 import time
 import argparse
 import subprocess
+import os
+import importlib
 import sqlite3
 from pathlib import Path
 
@@ -36,6 +38,28 @@ def ensure_playwright():
         print("✅ Playwright installed\n")
 
 ensure_playwright()
+
+
+def _ensure_anthropic():
+    try:
+        import anthropic  # noqa: F401
+    except ImportError:
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            print("Installing anthropic SDK...")
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", "anthropic", "-q"]
+                )
+                importlib.invalidate_caches()
+            except Exception as e:
+                print(f"   ⚠  anthropic install failed: {e} — cover notes will use static fallback")
+
+_ensure_anthropic()
+
+try:
+    import anthropic as _anthropic
+except ImportError:
+    _anthropic = None
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
@@ -131,6 +155,80 @@ PROFILE = {
         "this role and would love to bring that experience to your team."
     ),
 }
+
+# ── RESUME VARIANTS ────────────────────────────────────────────────────────
+RESUME_BASE = Path.home() / "job-search"
+RESUME_DEFAULT = "Resume-Senior-Quality-Engineer-ArielleIsrael.pdf"
+RESUME_VARIANTS = {
+    "manager":   "Resume-QE-Manager-ArielleIsrael.pdf",
+    "director":  "Resume-QE-Manager-ArielleIsrael.pdf",
+    "lead":      "Resume-Lead-SDET-ArielleIsrael.pdf",
+    "staff":     "Resume-Lead-SDET-ArielleIsrael.pdf",
+    "principal": "Resume-Lead-SDET-ArielleIsrael.pdf",
+}
+RESUME_FORCE_MAP = {
+    "ic":      str(RESUME_BASE / RESUME_DEFAULT),
+    "manager": str(RESUME_BASE / "Resume-QE-Manager-ArielleIsrael.pdf"),
+    "lead":    str(RESUME_BASE / "Resume-Lead-SDET-ArielleIsrael.pdf"),
+}
+_RESUME_FORCED = None   # set from --resume flag in main()
+
+# ── PER-JOB OVERRIDES (module-level, single-threaded safe) ────────────────
+# Populated by _prefill_page before each handler call; read by scroll_and_fill_all.
+_JOB_INFO: dict = {}
+
+
+def pick_resume(title: str) -> str:
+    """Return the absolute path to the best resume PDF for this job title."""
+    if _RESUME_FORCED:
+        return _RESUME_FORCED
+    t = (title or "").lower()
+    for keyword, filename in RESUME_VARIANTS.items():
+        if keyword in t:
+            path = str(RESUME_BASE / filename)
+            if Path(path).exists():
+                return path
+            break  # matched but missing — fall through to default
+    return str(RESUME_BASE / RESUME_DEFAULT)
+
+
+def pick_cover_note(page, job: dict) -> str:
+    """
+    Scrape the job page already open in `page` and call the Claude API to generate
+    a 3-sentence tailored cover note. Falls back to PROFILE["cover_note"] on any
+    API error or when _anthropic is not available.
+    """
+    if _anthropic is None:
+        return PROFILE["cover_note"]
+    try:
+        body_text = page.inner_text("body")[:3000]
+        title   = job.get("title", "")
+        company = job.get("company", "")
+        client  = _anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            system=(
+                "You are writing a cover note for a job application. "
+                "Write exactly 3 sentences. "
+                "Tone: confident, specific, no filler phrases. "
+                "Output only the 3 sentences, no preamble."
+            ),
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Candidate: Arielle Israel, QE leader, 17+ years, specializes in "
+                    f"Playwright/Cypress/Appium, web + mobile automation, CI/CD, team leadership.\n"
+                    f"Job title: {title} at {company}.\n"
+                    f"Job description excerpt: {body_text}"
+                ),
+            }],
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        print(f"  ⚠ Cover note generation failed: {e} — using default note")
+        return PROFILE["cover_note"]
+
 
 # ── FIELD MATCHERS ─────────────────────────────────────────────────────────
 # Maps common form field labels/names/ids → your profile values.
@@ -312,13 +410,23 @@ def handle_yes_no_radios(page):
 
 def scroll_and_fill_all(page):
     """Walk through FIELD_MAP and fill whatever fields are on the page."""
+    if _JOB_INFO and _anthropic and os.environ.get("ANTHROPIC_API_KEY"):
+        if "cover_note" not in _JOB_INFO:
+            _JOB_INFO["cover_note"] = pick_cover_note(page, _JOB_INFO)
+        cover_note = _JOB_INFO["cover_note"]
+    else:
+        cover_note = PROFILE["cover_note"]
+    resume_path = _JOB_INFO.get("resume_path") or PROFILE["resume_path"]
+
     filled = 0
     for label_patterns, value in FIELD_MAP:
-        if find_and_fill_by_label(page, label_patterns, value):
+        # Swap in the per-job cover note for the cover letter field
+        actual_value = cover_note if value == PROFILE["cover_note"] else value
+        if find_and_fill_by_label(page, label_patterns, actual_value):
             filled += 1
             time.sleep(0.3)
     handle_yes_no_radios(page)
-    attach_resume(page, PROFILE["resume_path"])
+    attach_resume(page, resume_path)
     return filled
 
 
@@ -588,6 +696,8 @@ def _prefill_page(page, job_info):
     Navigate to job_info['url'] and pre-fill the form on an already-open page.
     Prints the job header and calls the appropriate platform handler.
     """
+    global _JOB_INFO
+
     url = job_info.get("url", "") if isinstance(job_info, dict) else str(job_info)
 
     if isinstance(job_info, dict) and (job_info.get("title") or job_info.get("company")):
@@ -597,9 +707,21 @@ def _prefill_page(page, job_info):
         print(f"  {url}")
         print(f"{'─'*60}")
 
-    platform = detect_platform(url)
-    handler = HANDLERS[platform]
-    handler(page, url)
+    if isinstance(job_info, dict):
+        _JOB_INFO = {
+            "title":       job_info.get("title", ""),
+            "company":     job_info.get("company", ""),
+            "resume_path": pick_resume(job_info.get("title", "")),
+        }
+    else:
+        _JOB_INFO = {}
+
+    try:
+        platform = detect_platform(url)
+        handler = HANDLERS[platform]
+        handler(page, url)
+    finally:
+        _JOB_INFO = {}
 
 
 def run_application_prefill(playwright, job_info, headless=False):
@@ -830,10 +952,34 @@ def main():
                         help="Run browser in headless mode (not recommended)")
     parser.add_argument("--batch", type=int, default=5, metavar="N",
                         help="Open N applications simultaneously (default: 5; 1 = sequential mode)")
+    parser.add_argument(
+        "--resume", choices=["ic", "manager", "lead"], default=None,
+        help="Force a specific resume variant for this session (overrides auto-detection)"
+    )
     args = parser.parse_args()
 
     if not 1 <= args.batch <= 10:
         parser.error("--batch must be between 1 and 10")
+
+    global _RESUME_FORCED
+    if args.resume:
+        _RESUME_FORCED = RESUME_FORCE_MAP[args.resume]
+
+    # Validate all resume PDFs exist
+    for label, path in [
+        ("IC",      str(RESUME_BASE / RESUME_DEFAULT)),
+        ("Manager", str(RESUME_BASE / "Resume-QE-Manager-ArielleIsrael.pdf")),
+        ("Lead",    str(RESUME_BASE / "Resume-Lead-SDET-ArielleIsrael.pdf")),
+    ]:
+        if not Path(path).exists():
+            print(f"   ⚠  {label} resume not found: {path}")
+
+    if _anthropic is None:
+        print("   ⚠  anthropic package not installed — cover notes will use static fallback")
+    elif not os.environ.get("ANTHROPIC_API_KEY"):
+        print("   ⚠  ANTHROPIC_API_KEY not set — cover notes will use static fallback")
+    else:
+        print("   ✅ Claude API ready — cover notes will be tailored per job")
 
     if not args.jobs and not args.url:
         parser.print_help()
@@ -856,11 +1002,12 @@ def main():
     mode_label = f"Batch (size {args.batch})" if args.batch > 1 else "Sequential"
     print(f"   Mode: {mode_label}")
     print(f"\n   ⚠  You will review and submit each one yourself.")
-    print(f"   ⚠  Update PROFILE['resume_path'] before running if needed.")
-    print(f"\n   Resume: {PROFILE['resume_path']}")
-    resume_exists = Path(PROFILE["resume_path"]).exists()
-    if not resume_exists:
-        print(f"   ⚠  Resume file not found at that path — update it in the script!")
+    active_resume = _RESUME_FORCED or str(RESUME_BASE / RESUME_DEFAULT)
+    resume_label = f"forced ({args.resume})" if args.resume else "auto-detect by title"
+    print(f"\n   Resume selection: {resume_label}")
+    print(f"   Default/forced path: {active_resume}")
+    if not Path(active_resume).exists():
+        print(f"   ⚠  Resume file not found at that path!")
     print()
     input("   Press ENTER to begin, or Ctrl+C to cancel...\n")
 
