@@ -50,6 +50,16 @@ TIER_COLORS = {
 }
 
 
+def _migrate(db_path):
+    """Add columns introduced after initial schema without breaking existing data."""
+    conn = sqlite3.connect(db_path)
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "salary" not in existing:
+        conn.execute("ALTER TABLE jobs ADD COLUMN salary TEXT")
+        conn.commit()
+    conn.close()
+
+
 def _query(db_path, sql, params=()):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -202,6 +212,24 @@ def build_page(db_path: str) -> str:
                       margin-bottom: .5rem; cursor: pointer; user-select: none; }}
   .rejected-header::before {{ content: "▸ "; }}
   .rejected-cards {{ display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .5rem; }}
+  .log-bar {{ background: #fff; border-bottom: 1px solid #e2e8f0; padding: .5rem 1.5rem; }}
+  .log-toggle {{ background: none; border: 1px solid #cbd5e1; border-radius: 6px;
+                 padding: .35rem .8rem; font-size: .8rem; cursor: pointer; color: #475569;
+                 font-weight: 500; }}
+  .log-toggle:hover {{ background: #f8fafc; }}
+  .log-form {{ display: none; margin-top: .75rem; }}
+  .log-form.open {{ display: flex; flex-wrap: wrap; gap: .5rem; align-items: flex-end; }}
+  .log-form input {{ border: 1px solid #cbd5e1; border-radius: 5px; padding: .35rem .6rem;
+                      font-size: .8rem; color: #1e293b; background: #f8fafc; }}
+  .log-form input:focus {{ outline: 2px solid #3b82f6; border-color: transparent; background: #fff; }}
+  .log-form input[name="title"]   {{ width: 200px; }}
+  .log-form input[name="company"] {{ width: 150px; }}
+  .log-form input[name="url"]     {{ width: 280px; }}
+  .log-form input[name="salary"]  {{ width: 110px; }}
+  .log-form input[name="date"]    {{ width: 130px; }}
+  .log-submit {{ background: #3b82f6; color: #fff; border: none; border-radius: 5px;
+                  padding: .38rem .9rem; font-size: .8rem; font-weight: 600; cursor: pointer; }}
+  .log-submit:hover {{ background: #2563eb; }}
   .sources {{ padding: 1rem 1.5rem 2rem; }}
   .sources h2 {{ font-size: .85rem; font-weight: 600; margin-bottom: .5rem; }}
   .sources table {{ border-collapse: collapse; font-size: .8rem; }}
@@ -216,6 +244,17 @@ def build_page(db_path: str) -> str:
   <div class="stat"><div class="stat-val">{response_rate}</div><div class="stat-label">Response Rate</div></div>
   <div class="stat"><div class="stat-val">{interview_rate}</div><div class="stat-label">Interview Rate</div></div>
 </header>
+<div class="log-bar">
+  <button class="log-toggle" onclick="document.getElementById('log-form').classList.toggle('open');this.textContent=this.textContent.trim()==='＋ Log Application'?'✕ Cancel':'＋ Log Application'">＋ Log Application</button>
+  <form id="log-form" class="log-form" method="POST" action="/add">
+    <input name="title"   placeholder="Job title *"   required>
+    <input name="company" placeholder="Company *"      required>
+    <input name="url"     placeholder="Job URL *"      required>
+    <input name="salary"  placeholder="Salary (opt.)">
+    <input name="date"    type="date" value="{time.strftime('%Y-%m-%d')}" required>
+    <button type="submit" class="log-submit">Add to Pipeline</button>
+  </form>
+</div>
 <div class="board">{columns_html}</div>
 <div class="rejected-section">
   <div class="rejected-header">Rejected / withdrawn — {len(rejected_jobs)} (click to expand)</div>
@@ -259,10 +298,11 @@ def make_handler(db_path: str):
                 self.send_error(404)
 
         def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body   = self.rfile.read(length).decode()
+            params = parse_qs(body)
+
             if self.path == "/update":
-                length = int(self.headers.get("Content-Length", 0))
-                body   = self.rfile.read(length).decode()
-                params = parse_qs(body)
                 url    = params.get("url",    [""])[0]
                 status = params.get("status", [""])[0]
                 if url and status in VALID_STATUSES:
@@ -273,11 +313,31 @@ def make_handler(db_path: str):
                     )
                     conn.commit()
                     conn.close()
-                self.send_response(302)
-                self.send_header("Location", "/")
-                self.end_headers()
+
+            elif self.path == "/add":
+                url     = params.get("url",     [""])[0].strip()
+                title   = params.get("title",   [""])[0].strip()
+                company = params.get("company", [""])[0].strip()
+                salary  = params.get("salary",  [""])[0].strip()
+                date    = params.get("date",     [time.strftime("%Y-%m-%d")])[0].strip()
+                if url and title and company:
+                    conn = sqlite3.connect(db_path)
+                    conn.execute(
+                        """INSERT OR IGNORE INTO jobs
+                           (url, title, company, source, salary, status, date_seen, date_acted)
+                           VALUES (?, ?, ?, 'manual', ?, 'applied', ?, ?)""",
+                        (url, title, company, salary or None, date, date)
+                    )
+                    conn.commit()
+                    conn.close()
+
             else:
                 self.send_error(404)
+                return
+
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.end_headers()
 
     return Handler
 
@@ -289,6 +349,7 @@ def make_server(host: str, port: int, db_path: str) -> HTTPServer:
 def main():
     port = 8787
     url  = f"http://localhost:{port}"
+    _migrate(DB_PATH)
     server = make_server("127.0.0.1", port, DB_PATH)
     print(f"Dashboard running at {url}  (Ctrl-C to stop)")
     threading.Timer(0.3, lambda: webbrowser.open(url)).start()
