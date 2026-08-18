@@ -23,7 +23,6 @@ import time
 import argparse
 import subprocess
 import os
-import importlib
 import sqlite3
 from pathlib import Path
 
@@ -38,28 +37,6 @@ def ensure_playwright():
         print("✅ Playwright installed\n")
 
 ensure_playwright()
-
-
-def _ensure_anthropic():
-    try:
-        import anthropic  # noqa: F401
-    except ImportError:
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            print("Installing anthropic SDK...")
-            try:
-                subprocess.check_call(
-                    [sys.executable, "-m", "pip", "install", "anthropic", "-q"]
-                )
-                importlib.invalidate_caches()
-            except Exception as e:
-                print(f"   ⚠  anthropic install failed: {e} — cover notes will use static fallback")
-
-_ensure_anthropic()
-
-try:
-    import anthropic as _anthropic
-except ImportError:
-    _anthropic = None
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
@@ -173,6 +150,10 @@ RESUME_FORCE_MAP = {
 }
 _RESUME_FORCED = None   # set from --resume flag in main()
 
+# Persistent browser profile — sessions (LinkedIn, Greenhouse, etc.) survive between runs.
+# Run `python3 autofiller.py --login` once to log in; subsequent runs stay authenticated.
+BROWSER_PROFILE_DIR = Path.home() / "job-search" / ".browser-profile"
+
 # ── PER-JOB OVERRIDES (module-level, single-threaded safe) ────────────────
 # Populated by _prefill_page before each handler call; read by scroll_and_fill_all.
 _JOB_INFO: dict = {}
@@ -190,44 +171,6 @@ def pick_resume(title: str) -> str:
                 return path
             break  # matched but missing — fall through to default
     return str(RESUME_BASE / RESUME_DEFAULT)
-
-
-def pick_cover_note(page, job: dict) -> str:
-    """
-    Scrape the job page already open in `page` and call the Claude API to generate
-    a 3-sentence tailored cover note. Falls back to PROFILE["cover_note"] on any
-    API error or when _anthropic is not available.
-    """
-    if _anthropic is None:
-        return PROFILE["cover_note"]
-    try:
-        body_text = page.inner_text("body")[:3000]
-        title   = job.get("title", "")
-        company = job.get("company", "")
-        client  = _anthropic.Anthropic()
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            system=(
-                "You are writing a cover note for a job application. "
-                "Write exactly 3 sentences. "
-                "Tone: confident, specific, no filler phrases. "
-                "Output only the 3 sentences, no preamble."
-            ),
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Candidate: Arielle Israel, QE leader, 17+ years, specializes in "
-                    f"Playwright/Cypress/Appium, web + mobile automation, CI/CD, team leadership.\n"
-                    f"Job title: {title} at {company}.\n"
-                    f"Job description excerpt: {body_text}"
-                ),
-            }],
-        )
-        return response.content[0].text.strip()
-    except Exception as e:
-        print(f"  ⚠ Cover note generation failed: {e} — using default note")
-        return PROFILE["cover_note"]
 
 
 # ── FIELD MATCHERS ─────────────────────────────────────────────────────────
@@ -410,13 +353,9 @@ def handle_yes_no_radios(page):
 
 def scroll_and_fill_all(page):
     """Walk through FIELD_MAP and fill whatever fields are on the page."""
-    if _JOB_INFO and _anthropic and os.environ.get("ANTHROPIC_API_KEY"):
-        if "cover_note" not in _JOB_INFO:
-            _JOB_INFO["cover_note"] = pick_cover_note(page, _JOB_INFO)
-        cover_note = _JOB_INFO["cover_note"]
-    else:
-        cover_note = PROFILE["cover_note"]
-    resume_path = _JOB_INFO.get("resume_path") or PROFILE["resume_path"]
+    cover_note = PROFILE["cover_note"]
+    resume_path = _JOB_INFO.get("resume_path") if _JOB_INFO else None
+    resume_path = resume_path or PROFILE["resume_path"]
 
     filled = 0
     for label_patterns, value in FIELD_MAP:
@@ -604,35 +543,6 @@ HANDLERS = {
 
 
 # ── MAIN APPLICATION LOOP ─────────────────────────────────────────────────
-def get_chrome_profile_path():
-    """Find the user's real Chrome profile on Mac/Windows/Linux."""
-    import platform, os
-    system = platform.system()
-    home = Path.home()
-    candidates = []
-    if system == "Darwin":   # Mac
-        candidates = [
-            home / "Library/Application Support/Google/Chrome/Default",
-            home / "Library/Application Support/Google/Chrome",
-            home / "Library/Application Support/Chromium/Default",
-        ]
-    elif system == "Windows":
-        local = Path(os.environ.get("LOCALAPPDATA", ""))
-        candidates = [
-            local / "Google/Chrome/User Data/Default",
-            local / "Google/Chrome/User Data",
-        ]
-    else:  # Linux
-        candidates = [
-            home / ".config/google-chrome/Default",
-            home / ".config/chromium/Default",
-        ]
-    for p in candidates:
-        if p.exists():
-            # Playwright wants the parent of "Default", not "Default" itself
-            return str(p.parent) if p.name == "Default" else str(p)
-    return None
-
 
 def _close_context(context):
     """Close a browser context and its backing browser if one was launched for it."""
@@ -650,45 +560,41 @@ def _close_context(context):
             pass
 
 
-def _open_shared_context(playwright, headless=False):
+def _launch_persistent_context(playwright, headless=False):
     """
-    Open a single browser context (persistent Chrome profile if available, fresh
-    Chromium otherwise). Returns the context, or None on failure. Caller is
-    responsible for closing via _close_context().
+    Launch a persistent Chromium context using our dedicated profile dir.
+    Tries real Chrome first (avoids LinkedIn bot-detection); falls back to
+    Playwright's bundled Chromium if Chrome isn't installed.
     """
-    chrome_profile = get_chrome_profile_path()
-
-    if chrome_profile:
-        try:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=chrome_profile,
-                headless=headless,
-                slow_mo=80,
-                channel="chrome",          # use installed Chrome, not bundled Chromium
-                args=["--no-first-run", "--no-default-browser-check"],
-                viewport={"width": 1280, "height": 900},
-            )
-            log("Using your Chrome profile (auth sessions inherited)", "✓")
-            return context
-        except Exception as e:
-            log(f"Could not load Chrome profile ({e}) — using fresh browser", "!")
-
-    # Fallback: launch a plain Chromium browser
+    BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    stealth_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+    ]
+    shared_kwargs = dict(
+        user_data_dir=str(BROWSER_PROFILE_DIR),
+        headless=headless,
+        slow_mo=80,
+        args=stealth_args,
+        viewport={"width": 1280, "height": 900},
+    )
     try:
-        browser = playwright.chromium.launch(headless=headless, slow_mo=80)
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-        )
-        log("Using fresh browser — you may need to log in to LinkedIn/Indeed manually", "!")
-        return context
+        ctx = playwright.chromium.launch_persistent_context(channel="chrome", **shared_kwargs)
+        log("Browser ready (Chrome) — sessions loaded from persistent profile", "✓")
+        return ctx
+    except Exception:
+        pass  # Chrome not installed — fall back to bundled Chromium
+    try:
+        ctx = playwright.chromium.launch_persistent_context(**shared_kwargs)
+        log("Browser ready (Chromium) — sessions loaded from persistent profile", "✓")
+        return ctx
     except Exception as e:
         log(f"Failed to launch browser: {e}", "!")
         return None
+
+
+def _open_shared_context(playwright, headless=False):
+    return _launch_persistent_context(playwright, headless)
 
 
 def _prefill_page(page, job_info):
@@ -917,13 +823,31 @@ def run_batch_session(playwright, jobs, batch_size=5, headless=False, log_entrie
     return (applied, skipped)
 
 
+def _load_handled_urls():
+    """Return the set of URLs already actioned (applied, skipped, rejected, etc.)."""
+    if not DB_PATH.exists():
+        return set()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute(
+            "SELECT url FROM jobs WHERE status NOT IN ('new')"
+        )
+        urls = {row[0] for row in cur.fetchall()}
+        conn.close()
+        return urls
+    except Exception:
+        return set()
+
+
 def load_jobs_from_csv(csv_path, tier_filter=None, limit=None):
-    """Load job URLs from the agent's output CSV, optionally filtering by tier."""
+    """Load job URLs from the agent's output CSV, filtering out already-handled roles."""
     jobs = []
     path = Path(csv_path)
     if not path.exists():
         print(f"❌ CSV not found: {csv_path}")
         sys.exit(1)
+
+    handled = _load_handled_urls()
 
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -932,8 +856,17 @@ def load_jobs_from_csv(csv_path, tier_filter=None, limit=None):
                 row_tier = row.get("tier", "").upper()
                 if tier_filter.upper() not in row_tier:
                     continue
-            if row.get("url"):
+            url = row.get("url", "")
+            if url and url not in handled:
                 jobs.append(row)
+
+    skipped = 0
+    if handled:
+        # Count how many were filtered (informational)
+        with open(path, newline="", encoding="utf-8") as f:
+            total = sum(1 for r in csv.DictReader(f) if r.get("url") and r["url"] in handled)
+        if total:
+            print(f"   ↩  {total} already-handled role(s) skipped (applied/skipped/rejected)")
 
     if limit:
         jobs = jobs[:limit]
@@ -956,10 +889,44 @@ def main():
         "--resume", choices=["ic", "manager", "lead"], default=None,
         help="Force a specific resume variant for this session (overrides auto-detection)"
     )
+    parser.add_argument(
+        "--login", action="store_true",
+        help="Open browser to log in to job sites; sessions are saved for future runs"
+    )
     args = parser.parse_args()
 
     if not 1 <= args.batch <= 10:
         parser.error("--batch must be between 1 and 10")
+
+    # ── Login setup mode ───────────────────────────────────────────────────
+    if args.login:
+        LOGIN_URLS = [
+            "https://www.linkedin.com/login",
+            "https://boards.greenhouse.io",
+            "https://jobs.lever.co",
+        ]
+        print("\n🔐 Login Setup — opening job sites in your persistent browser")
+        print("   Log in to each site. Your sessions will be saved automatically.")
+        print("   When you're done with all sites, come back here and press ENTER.\n")
+        with sync_playwright() as playwright:
+            context = _launch_persistent_context(playwright, headless=False)
+            if context is None:
+                print("❌ Could not open browser. Is Chrome or Chromium installed?")
+                sys.exit(1)
+            pages_pool = list(context.pages)
+            for url in LOGIN_URLS:
+                if pages_pool:
+                    page = pages_pool.pop(0)
+                    page.goto(url)
+                else:
+                    context.new_page().goto(url)
+            try:
+                input("   Press ENTER once you've logged in to all sites...\n")
+            except (EOFError, KeyboardInterrupt):
+                pass
+            context.close()
+        print("✅ Sessions saved. Future autofiller runs will stay authenticated.\n")
+        sys.exit(0)
 
     global _RESUME_FORCED
     if args.resume:
@@ -973,13 +940,6 @@ def main():
     ]:
         if not Path(path).exists():
             print(f"   ⚠  {label} resume not found: {path}")
-
-    if _anthropic is None:
-        print("   ⚠  anthropic package not installed — cover notes will use static fallback")
-    elif not os.environ.get("ANTHROPIC_API_KEY"):
-        print("   ⚠  ANTHROPIC_API_KEY not set — cover notes will use static fallback")
-    else:
-        print("   ✅ Claude API ready — cover notes will be tailored per job")
 
     if not args.jobs and not args.url:
         parser.print_help()
