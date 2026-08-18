@@ -45,32 +45,56 @@ import sqlite3
 PROFILE = {
     "name": "Arielle Israel",
     "target_titles": [
-        "Senior Quality Engineer",
-        "Quality Engineering Lead",
-        "QE Lead",
-        "Senior QE",
-        "SDET Lead",
-        "Lead SDET",
-        "Software Development Engineer in Test",
-        "Senior SDET",
+        # Manager / leadership titles (primary focus)
         "Quality Engineering Manager",
         "QE Manager",
+        "QA Manager",
+        "QA Engineering Manager",
+        "Software Engineering Manager, Quality",
+        "Engineering Manager, Quality",
+        "Engineering Manager, QA",
+        "Engineering Manager, Quality Assurance",
+        "Test Engineering Manager",
+        "Senior Manager, Quality Engineering",
+        "Senior Manager of Quality Engineering",
+        "Director of Quality Engineering",
+        "Director of QA",
+        "Director of Quality Assurance",
+        "Director, Quality Engineering",
+        "Head of Quality Engineering",
+        "Head of QA",
+        "Head of Quality Assurance",
+        "VP of Quality Engineering",
+        "VP of Quality",
+        "Vice President of Quality",
+        # Lead titles (secondary)
+        "Quality Engineering Lead",
+        "QE Lead",
+        "SDET Lead",
+        "Lead SDET",
+        # IC senior titles (kept but lower priority)
+        "Senior Quality Engineer",
+        "Senior QE",
+        "Software Development Engineer in Test",
+        "Senior SDET",
         "Staff Quality Engineer",
         "Principal Quality Engineer",
     ],
     "search_queries": [
-        "senior quality engineer remote",
-        "SDET lead remote",
         "quality engineering manager remote",
-        "lead SDET remote",
-        "software development engineer in test remote",
-        "QE lead remote",
-        "senior test automation engineer remote",
-        "quality engineering lead remote",
+        "QE manager remote",
+        "QA manager remote",
+        "QA engineering manager remote",
+        "director of quality engineering remote",
+        "director of quality assurance remote",
+        "head of quality engineering remote",
+        "engineering manager quality remote",
+        "test engineering manager remote",
+        "senior manager quality engineering remote",
     ],
     "must_be_remote": True,
-    "salary_min": 100_000,
-    "salary_max": 130_000,
+    "salary_min": 140_000,
+    "salary_max": 220_000,
     "top_skills": [
         "Cypress", "Playwright", "Appium", "JavaScript", "test automation",
         "mobile testing", "CI/CD", "GitHub Actions", "Jenkins", "Selenium",
@@ -253,30 +277,31 @@ def fetch_jobicy():
         except Exception as e:
             print(f"  ⚠ Jobicy parse error: {e}", file=sys.stderr)
 
-    # Also search for SDET
-    r2 = polite_get("https://jobicy.com/api/v2/remote-jobs", params={
-        "count": 50,
-        "tag": "sdet",
-    })
-    if r2:
-        try:
-            data2 = r2.json()
-            existing_urls = {j["url"] for j in jobs}
-            for j in data2.get("jobs", []):
-                url = j.get("url", "")
-                if url not in existing_urls:
-                    jobs.append({
-                        "title": j.get("jobTitle", ""),
-                        "company": j.get("companyName", ""),
-                        "location": j.get("jobGeo", "Remote"),
-                        "url": url,
-                        "description": j.get("jobExcerpt", "") + " " + j.get("jobDescription", ""),
-                        "salary": j.get("annualSalaryMin", "") or "",
-                        "posted": j.get("pubDate", ""),
-                        "source": "Jobicy",
-                    })
-        except Exception:
-            pass
+    # Also search for SDET and QA manager roles
+    for extra_tag in ["sdet", "qa manager"]:
+        r2 = polite_get("https://jobicy.com/api/v2/remote-jobs", params={
+            "count": 50,
+            "tag": extra_tag,
+        })
+        if r2:
+            try:
+                data2 = r2.json()
+                existing_urls = {j["url"] for j in jobs}
+                for j in data2.get("jobs", []):
+                    url = j.get("url", "")
+                    if url not in existing_urls:
+                        jobs.append({
+                            "title": j.get("jobTitle", ""),
+                            "company": j.get("companyName", ""),
+                            "location": j.get("jobGeo", "Remote"),
+                            "url": url,
+                            "description": j.get("jobExcerpt", "") + " " + j.get("jobDescription", ""),
+                            "salary": j.get("annualSalaryMin", "") or "",
+                            "posted": j.get("pubDate", ""),
+                            "source": "Jobicy",
+                        })
+            except Exception:
+                pass
 
     print(f"    Jobicy: {len(jobs)} listings")
     return jobs
@@ -388,14 +413,16 @@ def fetch_linkedin_all():
     """Run multiple LinkedIn searches across all target role types."""
     all_jobs = []
     queries = [
-        "senior software quality engineer",
-        "SDET lead",
-        "senior SDET",
-        "software quality engineering manager",
-        "lead software development engineer test",
-        "software quality engineering lead",
-        "senior test automation engineer",
-        "QE lead software",
+        "quality engineering manager",
+        "QA manager engineering",
+        "engineering manager quality assurance",
+        "director of quality engineering",
+        "director of quality assurance",
+        "head of quality engineering",
+        "test engineering manager",
+        "senior manager quality engineering",
+        "QA engineering manager",
+        "engineering manager QE",
     ]
     seen = set()
     for q in queries:
@@ -473,11 +500,12 @@ def fetch_indeed_all():
     """Run multiple Indeed searches."""
     all_jobs = []
     queries = [
-        "senior quality engineer",
-        "SDET lead remote",
         "quality engineering manager remote",
-        "quality automation lead",
-        "lead software engineer in test",
+        "QA manager remote",
+        "director quality engineering remote",
+        "engineering manager quality assurance remote",
+        "head of quality engineering remote",
+        "test engineering manager remote",
     ]
     seen = set()
     for q in queries:
@@ -750,11 +778,15 @@ def score_job(job, since_days):
     else:
         return None, [], []  # Irrelevant — skip entirely
 
-    # ── Seniority (0–20) ──
-    senior_hits = [s for s in PROFILE["seniority_keywords"] if s in combined[:600]]
-    if senior_hits:
-        score += 20
-        reasons.append(f"Seniority: {senior_hits[0]}")
+    # ── Seniority (0–25) — manager/director/head titles score higher ──
+    mgr_signals = ["manager", "director", "head of", "vp of", "vice president"]
+    if any(s in title_lower for s in mgr_signals):
+        score += 25
+        reasons.append("Management/leadership role")
+    elif any(s in combined[:600] for s in PROFILE["seniority_keywords"]):
+        hits = [s for s in PROFILE["seniority_keywords"] if s in combined[:600]]
+        score += 15
+        reasons.append(f"Seniority: {hits[0]}")
     else:
         warnings.append("Seniority unclear")
         score += 3
