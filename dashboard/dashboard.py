@@ -24,25 +24,37 @@ DB_PATH = _os.environ.get(
     str(Path(__file__).parent.parent / "applied_jobs.db"),
 )
 
-VALID_STATUSES = {"applied", "responded", "interviewed", "offered", "rejected", "filled", "skipped"}
+VALID_STATUSES = {
+    "applied", "responded",
+    "first_round", "second_round", "final_round",
+    "interviewed",  # legacy — treated as first_round in the UI
+    "offered", "rejected", "filled", "skipped",
+}
+
+_FILLED_REJECTED = [("filled", "Position Filled"), ("rejected", "Mark Rejected")]
 
 NEXT_ACTIONS = {
-    "applied":     [("responded", "Mark Responded"), ("filled", "Position Filled"), ("rejected", "Mark Rejected")],
-    "responded":   [("interviewed", "Mark Interviewed"), ("filled", "Position Filled"), ("rejected", "Mark Rejected")],
-    "interviewed": [("offered", "Mark Offered"), ("filled", "Position Filled"), ("rejected", "Mark Rejected")],
-    "rejected":    [("applied", "↩ Restore to Applied")],
+    "applied":      [("responded", "Mark Responded")] + _FILLED_REJECTED,
+    "responded":    [("first_round", "1st Round Scheduled")] + _FILLED_REJECTED,
+    "first_round":  [("second_round", "2nd Round"), ("offered", "Mark Offered")] + _FILLED_REJECTED,
+    "second_round": [("final_round", "Final Round"), ("offered", "Mark Offered")] + _FILLED_REJECTED,
+    "final_round":  [("offered", "Mark Offered")] + _FILLED_REJECTED,
+    "interviewed":  [("first_round", "→ Move to 1st Round"), ("offered", "Mark Offered")] + _FILLED_REJECTED,
+    "rejected":     [("applied", "↩ Restore to Applied")],
 }
 
 # tooltip + onclick for each action button
 BUTTON_META = {
-    "responded":   ("Record that the company reached out to you", ""),
-    "interviewed": ("Record that you had an interview",           ""),
-    "offered":     ("Record that you received an offer",         ""),
-    "rejected":    ("Mark as rejected — you can restore it later",
-                    "return confirm('Mark this application as rejected?\\nYou can restore it later from the Rejected section.')"),
-    "filled":      ("The position was filled — not a rejection, just closed",
-                    "return confirm('Mark this position as filled?')"),
-    "applied":     ("Move back to the Applied column",           ""),
+    "responded":    ("Record that the company reached out to you", ""),
+    "first_round":  ("Schedule or record the first-round interview", ""),
+    "second_round": ("Record that a second-round interview was scheduled", ""),
+    "final_round":  ("Record that a final-round interview was scheduled", ""),
+    "offered":      ("Record that you received an offer", ""),
+    "rejected":     ("Mark as rejected — you can restore it later",
+                     "return confirm('Mark this application as rejected?\\nYou can restore it later from the Rejected section.')"),
+    "filled":       ("The position was filled — not a rejection, just closed",
+                     "return confirm('Mark this position as filled?')"),
+    "applied":      ("Move back to the Applied column", ""),
 }
 
 TIER_COLORS = {
@@ -131,15 +143,19 @@ def build_page(db_path: str) -> str:
     for j in all_jobs:
         by_status.setdefault(j["status"], []).append(j)
 
-    applied_jobs     = by_status.get("applied", [])
-    responded_jobs   = by_status.get("responded", [])
-    interviewed_jobs = by_status.get("interviewed", [])
-    offered_jobs     = by_status.get("offered", [])
-    rejected_jobs    = by_status.get("rejected", [])
-    filled_jobs      = by_status.get("filled", [])
+    applied_jobs      = by_status.get("applied", [])
+    responded_jobs    = by_status.get("responded", [])
+    # legacy "interviewed" rows merge into the 1st Round column
+    first_round_jobs  = by_status.get("first_round", []) + by_status.get("interviewed", [])
+    second_round_jobs = by_status.get("second_round", [])
+    final_round_jobs  = by_status.get("final_round", [])
+    offered_jobs      = by_status.get("offered", [])
+    rejected_jobs     = by_status.get("rejected", [])
+    filled_jobs       = by_status.get("filled", [])
 
-    responded_n   = len(responded_jobs) + len(interviewed_jobs) + len(offered_jobs)
-    interviewed_n = len(interviewed_jobs) + len(offered_jobs)
+    all_interview_jobs = first_round_jobs + second_round_jobs + final_round_jobs
+    responded_n   = len(responded_jobs) + len(all_interview_jobs) + len(offered_jobs)
+    interviewed_n = len(all_interview_jobs) + len(offered_jobs)
 
     def pct(num, denom):
         if denom == 0:
@@ -163,7 +179,9 @@ def build_page(db_path: str) -> str:
     columns_html = (
         _column("Applied", applied_jobs)
         + _column("Responded", responded_jobs)
-        + _column("Interviewed", interviewed_jobs)
+        + _column("1st Round", first_round_jobs)
+        + _column("2nd Round", second_round_jobs)
+        + _column("Final Round", final_round_jobs)
         + _column("Offered", offered_jobs)
     )
 
@@ -204,9 +222,11 @@ def build_page(db_path: str) -> str:
   .card-actions {{ margin-top: .5rem; display: flex; gap: .3rem; flex-wrap: wrap; }}
   .btn {{ border: none; border-radius: 4px; padding: 4px 10px;
            font-size: .72rem; cursor: pointer; font-weight: 600; }}
-  .btn-responded   {{ background: #dbeafe; color: #1d4ed8; }}
-  .btn-interviewed {{ background: #d1fae5; color: #065f46; }}
-  .btn-offered     {{ background: #fef3c7; color: #92400e; }}
+  .btn-responded    {{ background: #dbeafe; color: #1d4ed8; }}
+  .btn-first_round  {{ background: #d1fae5; color: #065f46; }}
+  .btn-second_round {{ background: #bbf7d0; color: #14532d; }}
+  .btn-final_round  {{ background: #a7f3d0; color: #064e3b; }}
+  .btn-offered      {{ background: #fef3c7; color: #92400e; }}
   .btn-rejected    {{ background: #fee2e2; color: #991b1b; }}
   .btn-filled      {{ background: #ede9fe; color: #5b21b6; }}
   .btn-applied     {{ background: #f0fdf4; color: #166534; border: 1px solid #86efac; }}
