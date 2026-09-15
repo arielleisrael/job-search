@@ -39,7 +39,7 @@ NEXT_ACTIONS = {
     "first_round":  [("second_round", "2nd Round"), ("offered", "Mark Offered")] + _FILLED_REJECTED,
     "second_round": [("final_round", "Final Round"), ("offered", "Mark Offered")] + _FILLED_REJECTED,
     "final_round":  [("offered", "Mark Offered")] + _FILLED_REJECTED,
-    "interviewed":  [("first_round", "→ Move to 1st Round"), ("offered", "Mark Offered")] + _FILLED_REJECTED,
+    "interviewed":  [("second_round", "2nd Round"), ("offered", "Mark Offered")] + _FILLED_REJECTED,
     "rejected":     [("applied", "↩ Restore to Applied")],
 }
 
