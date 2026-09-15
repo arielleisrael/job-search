@@ -24,12 +24,12 @@ DB_PATH = _os.environ.get(
     str(Path(__file__).parent.parent / "applied_jobs.db"),
 )
 
-VALID_STATUSES = {"applied", "responded", "interviewed", "offered", "rejected", "skipped"}
+VALID_STATUSES = {"applied", "responded", "interviewed", "offered", "rejected", "filled", "skipped"}
 
 NEXT_ACTIONS = {
-    "applied":     [("responded", "Mark Responded"), ("rejected", "Mark Rejected")],
-    "responded":   [("interviewed", "Mark Interviewed"), ("rejected", "Mark Rejected")],
-    "interviewed": [("offered", "Mark Offered"), ("rejected", "Mark Rejected")],
+    "applied":     [("responded", "Mark Responded"), ("filled", "Position Filled"), ("rejected", "Mark Rejected")],
+    "responded":   [("interviewed", "Mark Interviewed"), ("filled", "Position Filled"), ("rejected", "Mark Rejected")],
+    "interviewed": [("offered", "Mark Offered"), ("filled", "Position Filled"), ("rejected", "Mark Rejected")],
     "rejected":    [("applied", "↩ Restore to Applied")],
 }
 
@@ -40,6 +40,8 @@ BUTTON_META = {
     "offered":     ("Record that you received an offer",         ""),
     "rejected":    ("Mark as rejected — you can restore it later",
                     "return confirm('Mark this application as rejected?\\nYou can restore it later from the Rejected section.')"),
+    "filled":      ("The position was filled — not a rejection, just closed",
+                    "return confirm('Mark this position as filled?')"),
     "applied":     ("Move back to the Applied column",           ""),
 }
 
@@ -134,6 +136,7 @@ def build_page(db_path: str) -> str:
     interviewed_jobs = by_status.get("interviewed", [])
     offered_jobs     = by_status.get("offered", [])
     rejected_jobs    = by_status.get("rejected", [])
+    filled_jobs      = by_status.get("filled", [])
 
     responded_n   = len(responded_jobs) + len(interviewed_jobs) + len(offered_jobs)
     interviewed_n = len(interviewed_jobs) + len(offered_jobs)
@@ -149,7 +152,7 @@ def build_page(db_path: str) -> str:
     # Source breakdown
     source_rows = _query(db_path,
         "SELECT source, COUNT(*) as n FROM jobs "
-        "WHERE status NOT IN ('new','skipped','rejected') "
+        "WHERE status NOT IN ('new','skipped','rejected','filled') "
         "GROUP BY source ORDER BY n DESC"
     )
     source_html = "".join(
@@ -205,13 +208,14 @@ def build_page(db_path: str) -> str:
   .btn-interviewed {{ background: #d1fae5; color: #065f46; }}
   .btn-offered     {{ background: #fef3c7; color: #92400e; }}
   .btn-rejected    {{ background: #fee2e2; color: #991b1b; }}
+  .btn-filled      {{ background: #ede9fe; color: #5b21b6; }}
   .btn-applied     {{ background: #f0fdf4; color: #166534; border: 1px solid #86efac; }}
   .btn:hover {{ filter: brightness(.92); }}
-  .rejected-section {{ padding: .5rem 1.5rem 1rem; }}
-  .rejected-header {{ font-size: .85rem; font-weight: 600; color: #64748b;
+  .rejected-section, .filled-section {{ padding: .5rem 1.5rem 1rem; }}
+  .rejected-header, .filled-header {{ font-size: .85rem; font-weight: 600; color: #64748b;
                       margin-bottom: .5rem; cursor: pointer; user-select: none; }}
-  .rejected-header::before {{ content: "▸ "; }}
-  .rejected-cards {{ display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .5rem; }}
+  .rejected-header::before, .filled-header::before {{ content: "▸ "; }}
+  .rejected-cards, .filled-cards {{ display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .5rem; }}
   .log-bar {{ background: #fff; border-bottom: 1px solid #e2e8f0; padding: .5rem 1.5rem; }}
   .log-toggle {{ background: none; border: 1px solid #cbd5e1; border-radius: 6px;
                  padding: .35rem .8rem; font-size: .8rem; cursor: pointer; color: #475569;
@@ -256,6 +260,12 @@ def build_page(db_path: str) -> str:
   </form>
 </div>
 <div class="board">{columns_html}</div>
+<div class="filled-section">
+  <div class="filled-header">Position filled — {len(filled_jobs)} (click to expand)</div>
+  <div class="filled-cards" id="filled-cards" style="display:none">
+    {"".join(_card(j) for j in filled_jobs) if filled_jobs else '<p style="color:#94a3b8;font-size:.8rem">None yet</p>'}
+  </div>
+</div>
 <div class="rejected-section">
   <div class="rejected-header">Rejected / withdrawn — {len(rejected_jobs)} (click to expand)</div>
   <div class="rejected-cards" id="rejected-cards" style="display:none">
@@ -263,13 +273,16 @@ def build_page(db_path: str) -> str:
   </div>
 </div>
 <script>
-  document.querySelector('.rejected-header').addEventListener('click', function() {{
-    var cards = document.getElementById('rejected-cards');
-    var expanded = cards.style.display !== 'none';
-    cards.style.display = expanded ? 'none' : 'flex';
-    this.style.setProperty('--open', expanded ? '' : '▾ ');
-    this.innerHTML = this.innerHTML.replace(expanded ? '▾' : '▸', expanded ? '▸' : '▾');
-  }});
+  function _toggle(headerSel, cardId) {{
+    document.querySelector(headerSel).addEventListener('click', function() {{
+      var cards = document.getElementById(cardId);
+      var expanded = cards.style.display !== 'none';
+      cards.style.display = expanded ? 'none' : 'flex';
+      this.innerHTML = this.innerHTML.replace(expanded ? '▾' : '▸', expanded ? '▸' : '▾');
+    }});
+  }}
+  _toggle('.filled-header',   'filled-cards');
+  _toggle('.rejected-header', 'rejected-cards');
 </script>
 <div class="sources">
   <h2>Applications by source</h2>
