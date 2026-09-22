@@ -2,8 +2,9 @@
 """
 Generic Job Search Agent
 Searches remote job boards (We Work Remotely, Jobicy, Remote OK, Remotive,
-Himalayas, Working Nomads, Greenhouse, Ashby, LinkedIn, Indeed), scores each
-role against your profile, and delivers a ranked list ready to review and apply to.
+Himalayas, Working Nomads, The Muse, BuiltIn, Jobspresso, Greenhouse, Ashby,
+BambooHR, LinkedIn, Indeed), scores each role against your profile, and
+delivers a ranked list ready to review and apply to.
 
 Setup:
   1. Copy profile_template.json → profile.json
@@ -564,6 +565,199 @@ def fetch_workingnomads():
     return jobs
 
 
+def fetch_themuse():
+    """The Muse — public JSON API, no auth required."""
+    jobs = []
+    job_keywords = [k.lower() for k in PROFILE.get("job_keywords", [])]
+    for page in range(1, 4):
+        r = polite_get("https://www.themuse.com/api/public/jobs", params={
+            "category": "Engineering",
+            "level": "Senior Level",
+            "location": "Flexible / Remote",
+            "page": page,
+        }, delay=1.0)
+        if not r:
+            break
+        try:
+            data = r.json()
+            results = data.get("results", [])
+            if not results:
+                break
+            for j in results:
+                title = j.get("name", "")
+                if not any(k in title.lower() for k in job_keywords):
+                    continue
+                company = (j.get("company") or {}).get("name", "")
+                locs = j.get("locations", [])
+                location = ", ".join(l.get("name", "") for l in locs) if locs else "Remote"
+                refs = j.get("refs", {})
+                url = refs.get("landing_page", "")
+                contents = j.get("contents", "")
+                desc = re.sub(r"<[^>]+>", " ", contents)[:2000] if contents else ""
+                posted = (j.get("publication_date") or "")[:10]
+                jobs.append({
+                    "title": title,
+                    "company": company,
+                    "location": location,
+                    "url": url,
+                    "description": desc,
+                    "salary": "",
+                    "posted": posted,
+                    "source": "The Muse",
+                })
+        except Exception as e:
+            print(f"  ⚠ The Muse parse error: {e}", file=sys.stderr)
+            break
+    print(f"    The Muse: {len(jobs)} listings")
+    return jobs
+
+
+def fetch_builtin():
+    """BuiltIn — tech/startup focused board, HTML scraping."""
+    jobs = []
+    job_keywords = [k.lower() for k in PROFILE.get("job_keywords", [])]
+    search_terms = PROFILE.get("search_queries", [])[:2]
+    pages = ["https://builtin.com/jobs/remote/dev-engineering"]
+    for term in search_terms:
+        pages.append(f"https://builtin.com/jobs/remote/dev-engineering?search={requests.utils.quote(term)}")
+
+    seen = set()
+    for page_url in pages:
+        r = polite_get(page_url, delay=2.0)
+        if not r:
+            continue
+        soup = BeautifulSoup(r.text, "html.parser")
+        cards = soup.find_all("div", class_=re.compile(r"job-card|job-listing|job-bounded-responsive"))
+        if not cards:
+            cards = soup.find_all("div", attrs={"data-id": True})
+        for card in cards:
+            title_el = card.find(["h2", "h3", "a"], class_=re.compile(r"title|job-title"))
+            company_el = card.find(["span", "div", "a"], class_=re.compile(r"company|employer"))
+            location_el = card.find(["span", "div"], class_=re.compile(r"location|workplace"))
+            link_el = card.find("a", href=re.compile(r"/job/|/jobs/"))
+            date_el = card.find(["span", "time"], class_=re.compile(r"date|posted|time"))
+
+            title = title_el.get_text(strip=True) if title_el else ""
+            if not any(k in title.lower() for k in job_keywords):
+                continue
+            company = company_el.get_text(strip=True) if company_el else ""
+            location = location_el.get_text(strip=True) if location_el else "Remote"
+
+            url = ""
+            if link_el and link_el.get("href"):
+                href = link_el["href"]
+                url = f"https://builtin.com{href}" if href.startswith("/") else href
+
+            posted = ""
+            if date_el:
+                posted = date_el.get("datetime", "") or date_el.get_text(strip=True)
+
+            if title and url and url not in seen:
+                seen.add(url)
+                jobs.append({
+                    "title": title,
+                    "company": company,
+                    "location": location,
+                    "url": url,
+                    "description": f"{title} at {company}. {location}.",
+                    "salary": "",
+                    "posted": posted[:10],
+                    "source": "BuiltIn",
+                })
+    print(f"    BuiltIn: {len(jobs)} listings")
+    return jobs
+
+
+def fetch_jobspresso():
+    """Jobspresso — remote-only board, RSS feed."""
+    jobs = []
+    job_keywords = [k.lower() for k in PROFILE.get("job_keywords", [])]
+    r = polite_get("https://jobspresso.co/feed/")
+    if r:
+        try:
+            soup = BeautifulSoup(r.content, "lxml-xml")
+            for item in soup.find_all("item"):
+                title_el = item.find("title")
+                link_el = item.find("link")
+                pub_el = item.find("pubDate")
+                desc_el = item.find("description")
+                creator_el = item.find("dc:creator") or item.find("creator")
+
+                title = title_el.get_text(strip=True) if title_el else ""
+                if not any(k in title.lower() for k in job_keywords):
+                    desc_text = desc_el.get_text()[:500].lower() if desc_el else ""
+                    if not any(k in desc_text for k in job_keywords):
+                        continue
+                company = creator_el.get_text(strip=True) if creator_el else ""
+                url = link_el.get_text(strip=True) if link_el else ""
+                posted = pub_el.get_text(strip=True) if pub_el else ""
+                desc = BeautifulSoup(desc_el.get_text(), "html.parser").get_text()[:2000] if desc_el else ""
+                if title and url:
+                    jobs.append({
+                        "title": title,
+                        "company": company,
+                        "location": "Remote",
+                        "url": url,
+                        "description": desc,
+                        "salary": "",
+                        "posted": posted,
+                        "source": "Jobspresso",
+                    })
+        except Exception as e:
+            print(f"  ⚠ Jobspresso parse error: {e}", file=sys.stderr)
+    print(f"    Jobspresso: {len(jobs)} listings")
+    return jobs
+
+
+def fetch_bamboohr_boards():
+    """BambooHR — ATS used by mid-size companies. Public JSON API per company."""
+    companies = PROFILE.get("bamboohr_companies", [
+        "asana", "buffer", "zapier", "automattic", "invisionapp",
+        "hotjar", "toggl", "doist", "close", "liveagent",
+        "helpscout", "convertkit", "basecamp", "ghost", "calendly",
+    ])
+    job_keywords = [k.lower() for k in PROFILE.get("job_keywords", [])]
+    jobs = []
+    for company in companies:
+        url = f"https://{company}.bamboohr.com/careers/list"
+        time.sleep(0.5 + random.uniform(0, 0.3))
+        try:
+            r = SESSION.get(url, timeout=10, headers={**HEADERS, "Accept": "application/json"})
+            if r.status_code in (404, 403):
+                continue
+            r.raise_for_status()
+        except requests.exceptions.RequestException:
+            continue
+        try:
+            data = r.json()
+            job_list = data if isinstance(data, list) else data.get("result", [])
+            for j in job_list:
+                title = j.get("jobOpeningName", "") or j.get("title", "")
+                if not any(k in title.lower() for k in job_keywords):
+                    continue
+                location = j.get("location", {})
+                if isinstance(location, dict):
+                    loc_str = location.get("city", "") or location.get("name", "") or "Remote"
+                else:
+                    loc_str = str(location) or "Remote"
+                job_id = j.get("id", "")
+                job_url = f"https://{company}.bamboohr.com/careers/{job_id}" if job_id else ""
+                jobs.append({
+                    "title": title,
+                    "company": company.title(),
+                    "location": loc_str,
+                    "url": job_url,
+                    "description": j.get("description", title)[:2000],
+                    "salary": "",
+                    "posted": "",
+                    "source": "BambooHR",
+                })
+        except Exception:
+            pass
+    print(f"    BambooHR boards: {len(jobs)} listings")
+    return jobs
+
+
 # ─── SCORING ─────────────────────────────────────────────────────────────────
 
 def parse_date(date_str):
@@ -792,6 +986,10 @@ def main():
         ("Remotive",         fetch_remotive),
         ("Himalayas",        fetch_himalayas),
         ("Working Nomads",   fetch_workingnomads),
+        ("The Muse",         fetch_themuse),
+        ("BuiltIn",          fetch_builtin),
+        ("Jobspresso",       fetch_jobspresso),
+        ("BambooHR",         fetch_bamboohr_boards),
     ]
     if not args.skip_linkedin:
         boards.append(("LinkedIn", fetch_linkedin_all))
