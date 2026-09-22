@@ -84,5 +84,11 @@
         "loom", "ramp", "mercury", "vercel", "render",
         "neon", "supabase", "wiz", "launchdarkly", "bettercloud",
         "prefect", "airbyte", "hightouch", "amplitude"
+    ],
+
+    "bamboohr_companies": [
+        "asana", "buffer", "zapier", "automattic", "invisionapp",
+        "hotjar", "toggl", "doist", "close", "liveagent",
+        "helpscout", "convertkit", "basecamp", "ghost", "calendly"
     ]
 }
