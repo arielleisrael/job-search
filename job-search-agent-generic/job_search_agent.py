@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Generic Job Search Agent
-Searches remote job boards, scores each role against your profile,
-and delivers a ranked list ready to review and apply to.
+Searches remote job boards (We Work Remotely, Jobicy, Remote OK, Remotive,
+Himalayas, Working Nomads, Greenhouse, Ashby, LinkedIn, Indeed), scores each
+role against your profile, and delivers a ranked list ready to review and apply to.
 
 Setup:
   1. Copy profile_template.json → profile.json
@@ -435,6 +436,134 @@ def fetch_ashby_boards():
     return jobs
 
 
+def fetch_remotive():
+    """Remotive — curated remote job board with a public JSON API."""
+    jobs = []
+    job_keywords = [k.lower() for k in PROFILE.get("job_keywords", [])]
+
+    r = polite_get("https://remotive.com/api/remote-jobs", params={
+        "category": "qa",
+        "limit": 50,
+    })
+    if r:
+        try:
+            data = r.json()
+            for j in data.get("jobs", []):
+                jobs.append({
+                    "title": j.get("title", ""),
+                    "company": j.get("company_name", ""),
+                    "location": j.get("candidate_required_location", "Remote"),
+                    "url": j.get("url", ""),
+                    "description": re.sub(r"<[^>]+>", " ", j.get("description", ""))[:2000],
+                    "salary": j.get("salary", "") or "",
+                    "posted": (j.get("publication_date") or "")[:10],
+                    "source": "Remotive",
+                })
+        except Exception as e:
+            print(f"  ⚠ Remotive parse error: {e}", file=sys.stderr)
+
+    r2 = polite_get("https://remotive.com/api/remote-jobs", params={
+        "category": "software-dev",
+        "limit": 100,
+    })
+    if r2:
+        try:
+            data2 = r2.json()
+            existing_urls = {j["url"] for j in jobs}
+            for j in data2.get("jobs", []):
+                title_lower = j.get("title", "").lower()
+                if not any(k in title_lower for k in job_keywords):
+                    continue
+                url = j.get("url", "")
+                if url in existing_urls:
+                    continue
+                jobs.append({
+                    "title": j.get("title", ""),
+                    "company": j.get("company_name", ""),
+                    "location": j.get("candidate_required_location", "Remote"),
+                    "url": url,
+                    "description": re.sub(r"<[^>]+>", " ", j.get("description", ""))[:2000],
+                    "salary": j.get("salary", "") or "",
+                    "posted": (j.get("publication_date") or "")[:10],
+                    "source": "Remotive",
+                })
+        except Exception:
+            pass
+
+    print(f"    Remotive: {len(jobs)} listings")
+    return jobs
+
+
+def fetch_himalayas():
+    """Himalayas — modern remote job board with a public JSON API."""
+    jobs = []
+    job_keywords = PROFILE.get("job_keywords", [])
+    seen_urls = set()
+    for keyword in job_keywords[:4]:
+        r = polite_get("https://himalayas.app/jobs/api", params={
+            "q": keyword,
+            "limit": 50,
+        })
+        if not r:
+            continue
+        try:
+            data = r.json()
+            for j in data.get("jobs", []):
+                url = j.get("applicationUrl", "") or j.get("url", "")
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                jobs.append({
+                    "title": j.get("title", ""),
+                    "company": j.get("companyName", "") or (j.get("company", {}) or {}).get("name", ""),
+                    "location": j.get("location", "Remote"),
+                    "url": url,
+                    "description": (j.get("description", "") or j.get("excerpt", ""))[:2000],
+                    "salary": j.get("salary", "") or "",
+                    "posted": (j.get("pubDate", "") or j.get("publishedAt", "") or "")[:10],
+                    "source": "Himalayas",
+                })
+        except Exception as e:
+            print(f"  ⚠ Himalayas parse error: {e}", file=sys.stderr)
+
+    print(f"    Himalayas: {len(jobs)} listings")
+    return jobs
+
+
+def fetch_workingnomads():
+    """Working Nomads — remote job listings via JSON API."""
+    jobs = []
+    job_keywords = [k.lower() for k in PROFILE.get("job_keywords", [])]
+    r = polite_get("https://www.workingnomads.com/api/exposed_jobs/")
+    if r:
+        try:
+            data = r.json()
+            if not isinstance(data, list):
+                data = data.get("jobs", data.get("results", []))
+            for j in data:
+                title = j.get("title", "")
+                desc = j.get("description", "") or ""
+                combined = f"{title.lower()} {desc[:500].lower()}"
+                if not any(k in combined for k in job_keywords):
+                    continue
+                location = j.get("location", "") or "Remote"
+                jobs.append({
+                    "title": title,
+                    "company": j.get("company_name", "") or j.get("company", ""),
+                    "location": location,
+                    "url": j.get("url", "") or j.get("apply_url", ""),
+                    "description": re.sub(r"<[^>]+>", " ", desc)[:2000],
+                    "salary": j.get("salary", "") or "",
+                    "posted": (j.get("pub_date", "") or j.get("published", ""))[:10],
+                    "source": "Working Nomads",
+                })
+        except Exception as e:
+            print(f"  ⚠ Working Nomads parse error: {e}", file=sys.stderr)
+
+    print(f"    Working Nomads: {len(jobs)} listings")
+    return jobs
+
+
 # ─── SCORING ─────────────────────────────────────────────────────────────────
 
 def parse_date(date_str):
@@ -660,6 +789,9 @@ def main():
         ("Remote OK",        fetch_remoteok),
         ("Greenhouse",       fetch_greenhouse_boards),
         ("Ashby",            fetch_ashby_boards),
+        ("Remotive",         fetch_remotive),
+        ("Himalayas",        fetch_himalayas),
+        ("Working Nomads",   fetch_workingnomads),
     ]
     if not args.skip_linkedin:
         boards.append(("LinkedIn", fetch_linkedin_all))
